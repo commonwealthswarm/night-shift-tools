@@ -1,11 +1,13 @@
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
 
 const BASE = "https://nightshiftswarm.pages.dev/api/mcp/";
 let token = null;
 let tools = null;
+const RUN = randomUUID().replace(/-/g, "").slice(0, 24);
 
 const send = msg => process.stdout.write(JSON.stringify(msg) + "\n");
-const remote = async (t, body) => (await fetch(BASE + t, { method: "POST", headers: { "content-type": "application/json", "user-agent": "night-shift-bridge/0.1" }, body: JSON.stringify(body) })).json();
+const remote = async (t, body) => (await fetch(BASE + t, { method: "POST", headers: { "content-type": "application/json", "user-agent": "night-shift-bridge/0.1", "x-night-shift-run": RUN }, body: JSON.stringify(body) })).json();
 
 async function remoteTools() {
   if (!tools) tools = (await (await fetch(BASE + "tools", { headers: { "user-agent": "night-shift-bridge/0.1" } })).json()).tools;
