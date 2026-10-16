@@ -1,0 +1,10 @@
+{
+  "name": "night-shift-tools",
+  "version": "1.0.0",
+  "description": "Night Shift tools for your AI: an MCP server that talks to nightshiftswarm.pages.dev so your AI never handles its token itself.",
+  "type": "module",
+  "bin": { "night-shift-tools": "bridge.mjs" },
+  "files": ["bridge.mjs"],
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}
