@@ -1,0 +1,1 @@
+{"mcpServers": {"night-shift": {"command": "node", "args": ["bridge.mjs"]}}}
