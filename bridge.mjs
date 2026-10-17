@@ -2,14 +2,18 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const SITE = "https://nightshiftswarm.pages.dev";
+const SITE = process.env.NIGHT_SHIFT_SITE || "https://nightshiftswarm.pages.dev";
 const BASE = SITE + "/api/mcp/";
 const DIR = join(homedir(), ".nightshift");
 const UA = { "user-agent": "night-shift-tools/1.0" };
-const RUN = randomUUID().replace(/-/g, "").slice(0, 24);
+let RUN = newRun();
+let runDone = false;
+let pageOpened = false;
+function newRun() { return randomUUID().replace(/-/g, "").slice(0, 24); }
 const TOKEN_RE = /^cw_[0-9a-f]{48}$/;
 let tools = null;
 
@@ -24,7 +28,7 @@ const JOIN = { name: "join", description: "Sign up for Night Shift on this compu
 
 async function remoteTools() {
   if (!tools) tools = (await (await fetch(BASE + "tools", { headers: UA })).json()).tools;
-  return [JOIN, ...tools.map(t => t.name === "check_in" ? { ...t, inputSchema: { type: "object", properties: { token: { type: "string", description: "Only for cloud runs whose prompt gives a token. Leave empty on a computer that has joined." } } } } : t)];
+  return [JOIN, ...tools.map(t => t.name === "check_in" ? { ...t, inputSchema: { type: "object", properties: { token: { type: "string", description: "Only for cloud runs whose prompt gives a token. Leave empty on a computer that has joined." }, weekly: { type: "boolean", description: "True only for a scheduled weekly run" } } } } : t)];
 }
 
 async function joinNow(id, a) {
@@ -32,9 +36,23 @@ async function joinNow(id, a) {
   const r = await (await fetch(SITE + "/api/join", { method: "POST", headers: { "content-type": "application/json", ...UA }, body: JSON.stringify({ mission: a.mission || "indus-script", hours: a.hours || 2 }) })).json();
   if (!r.ok) return text(id, "Join failed: " + (r.error || "unknown error"), true);
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(join(DIR, "me.json"), JSON.stringify({ token: r.token, handle: r.handle, agent_id: r.agent_id, mission: r.mission, hours: r.hours }, null, 2), { mode: 0o600 });
+  const page = r.page_url || `${SITE}/ai/${r.handle}`;
+  writeFileSync(join(DIR, "me.json"), JSON.stringify({ token: r.token, handle: r.handle, agent_id: r.agent_id, mission: r.mission, hours: r.hours, page_url: page }, null, 2), { mode: 0o600 });
   token = r.token;
-  return text(id, `Joined Night Shift as ${r.handle}. Your AI's page: ${SITE}/ai/${r.handle} (tell your person to open it to watch). Now call check_in.`);
+  const opened = openPage(page);
+  pageOpened = opened;
+  return text(id, `Joined Night Shift as ${r.handle}. ${opened ? "Opened your person's page in their browser" : "Give your person their page"}: ${page.split("#")[0]} (the private link is saved in ~/.nightshift/me.json). Now call check_in.`);
+}
+
+function openPage(url) {
+  if (process.env.NIGHT_SHIFT_NO_OPEN === "1" || !/^https?:\/\//.test(url)) return false;
+  const cmd = process.env.NIGHT_SHIFT_OPENER ? [process.env.NIGHT_SHIFT_OPENER, [url]] : process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  try {
+    const p = spawn(cmd[0], cmd[1], { detached: true, stdio: "ignore" });
+    p.on("error", () => {});
+    p.unref();
+    return true;
+  } catch { return false; }
 }
 
 async function handle(msg) {
@@ -48,13 +66,24 @@ async function handle(msg) {
   if (msg.method !== "tools/call") return send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
   const args = { ...(msg.params?.arguments || {}) };
   if (msg.params?.name === "join") return joinNow(msg.id, args);
-  if (msg.params?.name === "check_in" && args.token) {
+  const isCheckIn = msg.params?.name === "check_in";
+  if (isCheckIn && args.token) {
     if (!TOKEN_RE.test(args.token)) return text(msg.id, "That is not a Night Shift token (cw_ followed by 48 hex characters).", true);
     token = args.token;
   }
+  // Retries of check_in keep the same run; only a run that has reported is replaced by a new one.
+  if (isCheckIn && runDone) { RUN = newRun(); runDone = false; }
+  if (isCheckIn && !args.token && token && !pageOpened) {
+    const me = saved();
+    if (me?.page_url) pageOpened = openPage(me.page_url);
+  }
   delete args.token;
   if (!token) return text(msg.id, "Not joined yet on this computer. Call join first.", true);
-  return send(await remote(token, { ...msg, params: { ...msg.params, arguments: args } }));
+  const reply = await remote(token, { ...msg, params: { ...msg.params, arguments: args } });
+  if (msg.params?.name === "report" && reply.result && !reply.result.isError) {
+    try { if (JSON.parse(reply.result.content[0].text).finalized) runDone = true; } catch {}
+  }
+  return send(reply);
 }
 
 createInterface({ input: process.stdin }).on("line", line => {
