@@ -38,11 +38,12 @@ export function managedSettings(paths = MANAGED_PATHS[process.platform] || []) {
 }
 
 // Night Shift must be able to show that a run stays inside the plan's included usage. Anthropic documents an
-// account setting for this (Settings > Usage > Usage credits: Off), but it is set by the person on their account and
-// Claude Code reports nothing about it to a script, so the launcher can't check it. --max-budget-usd is an estimate
+// account setting for this (Settings > Usage > Usage credits: Off), but it is set by the person on their account, and
+// Night Shift hasn't verified a supported script interface for it (claude auth status doesn't include it, and the
+// public docs reviewed describe none), so the launcher can't check it. --max-budget-usd is an estimate
 // that can overshoot and turning off auto-reload still allows existing credits, so neither stands in for it.
 export function includedUsageOnly(status) {
-  return { ok: false, why: "extra_usage_unverified", say: "Night Shift can't confirm from this computer that a run would stay within your plan's included usage. Your Claude account has a setting for that (Settings > Usage > Usage credits: Off), but Claude Code doesn't report it, so Night Shift can't check it and doesn't start, even if you have turned it off. Nothing was charged." };
+  return { ok: false, why: "extra_usage_unverified", say: "Night Shift can't confirm from this computer that a run would stay within your plan's included usage. Your Claude account has a setting for that (Settings > Usage > Usage credits: Off), but Night Shift can't currently check that setting from here, so it doesn't start, even if you have turned it off. Nothing was charged." };
 }
 
 // With Codex 0.163.0's own options (test/codex-probe.mjs), Codex still sent the person's own global instructions and
