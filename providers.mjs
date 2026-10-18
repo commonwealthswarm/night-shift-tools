@@ -37,23 +37,19 @@ export function managedSettings(paths = MANAGED_PATHS[process.platform] || []) {
   return found.length ? { ok: false, why: "managed", found, say: "This computer has organization-managed Claude Code settings, which apply even inside Night Shift's limits and could change them. Night Shift didn't start." } : { ok: true };
 }
 
-// Night Shift must be able to show that a run stays inside the plan's included usage. Anthropic documents an
-// account setting for this (Settings > Usage > Usage credits: Off), but it is set by the person on their account, and
-// Night Shift hasn't verified a supported script interface for it (claude auth status doesn't include it, and the
-// public docs reviewed describe none), so the launcher can't check it. --max-budget-usd is an estimate
-// that can overshoot and turning off auto-reload still allows existing credits, so neither stands in for it.
-export function includedUsageOnly(status) {
-  return { ok: false, why: "extra_usage_unverified", say: "Night Shift can't confirm from this computer that a run would stay within your plan's included usage. Your Claude account has a setting for that (Settings > Usage > Usage credits: Off), but Night Shift can't currently check that setting from here, so it doesn't start, even if you have turned it off. Nothing was charged." };
-}
+// Contributor-selected overflow on the verified subscription is allowed. Night Shift neither reads nor changes
+// that account setting. This notice is not proof of the setting or a zero-cost guarantee. API-key/cloud billing
+// and silent credential fallback remain blocked by the effective-auth preflight and minimal environment.
+export const SUBSCRIPTION_USAGE_NOTICE = "Night Shift uses your signed-in Claude subscription. Your existing account settings apply: if you enabled extra usage, this run may incur additional charges. Night Shift does not change those settings or switch to API-key billing.";
 
 // With Codex 0.163.0's own options (test/codex-probe.mjs), Codex still sent the person's own global instructions and
 // skills to the model and wrote state into $CODEX_HOME. An experimental macOS file restriction
 // (experimental/codex-context.mjs, test/codex-context.mjs) kept them out in a test with stand-in files, but it isn't a
-// runner: real sign-in, network limits, stopping a run and billing aren't covered. ChatGPT plans can also draw on
-// paid credits after the included limits, and Codex offers no per-run setting found so far to prevent that.
+// runner: real sign-in, network limits and stopping a run aren't covered. Contributor-selected subscription
+// overflow is allowed; it is not the reason Codex remains unavailable.
 export const CODEX_BLOCKERS = [
   "With Codex 0.163.0's own options, Codex still sent your personal Codex instructions and skills to the model. An experimental file restriction kept them out in a test with stand-in files, but it hasn't been accepted as a full, safe way to run Codex yet.",
-  "Your ChatGPT plan can use paid credits after its included limits, and Night Shift hasn't found a way to stop a Codex run from doing that.",
+  "Codex stays unavailable until its complete privacy boundary, effective subscription authentication and stop controls are implemented and tested.",
 ];
 export async function codexState(bin, env, cwd) {
   const v = await run(bin, ["--version"], env, cwd);
@@ -63,5 +59,5 @@ export async function codexState(bin, env, cwd) {
   return { ok: false, why: "codex_unsupported", version: (v.out.match(/(\d+\.\d+\.\d+)/) || [])[1] || null, auth, say: "Night Shift doesn't run on Codex yet. " + CODEX_BLOCKERS.join(" ") + " Nothing was started." };
 }
 
-// A run that ended because the plan's usage ran out: no retry, no other credential, no paid fallback.
+// A provider usage rejection still ends the run: no launcher retry, other credential or API-key fallback.
 export const USAGE_LIMIT = /usage limit|limit reached|rate[ _-]?limit|429|too many requests/i;

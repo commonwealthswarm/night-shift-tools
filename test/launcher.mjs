@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { judge, scanTranscript, teardown, identity, runEnv, testMode, preflight, RUN_PREFIX, trip, stopMessage, scheduleSpec, plistFor, cronFor } from "../launcher.mjs";
-import { claudeVersion, managedSettings, includedUsageOnly, codexState } from "../providers.mjs";
+import { claudeVersion, managedSettings, codexState } from "../providers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bridge = path.join(here, "..", "bridge.mjs");
@@ -98,7 +98,7 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   const results = await Promise.all(refused.map(([st]) => check(JSON.stringify(st), st.loggedIn ? 0 : 1)));
   ok(results.every((r, i) => !r.ok && refused[i][1].test(r.say) && /never falls back|isn't signed in/.test(r.say)), "API keys, key helpers, cloud providers, token variables, unknown methods and signed-out states are all refused, saying why");
   const saved = await check(JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty", apiKeySource: "/login managed key" }));
-  ok(!saved.ok && /\/login managed key/.test(saved.say) && /desktop app doesn't sign Terminal in/.test(saved.say) && /claude auth login --claudeai/.test(saved.say) && /never signs in for you/.test(saved.say) && /Even then, runs stay off/.test(saved.say), "a saved Terminal API-key sign-in is refused with the exact sign-in step for the person, and says runs stay off after it");
+  ok(!saved.ok && /\/login managed key/.test(saved.say) && /desktop app doesn't sign Terminal in/.test(saved.say) && /claude auth login --claudeai/.test(saved.say) && /never signs in for you/.test(saved.say) && /extra-usage settings remain your choice/.test(saved.say), "a saved API-key sign-in is still refused; subscription overflow remains the contributor's choice");
   ok(!(await check("not json")).ok && !(await preflight(path.join(F, "missing"), { PATH: "/nonexistent" }, F)).ok, "unreadable status or a missing Claude Code refuses too");
   const tmp = path.join(F, "tmp"); mkdirSync(tmp);
   const run = spawn(process.execPath, [bridge, "start"], { env: { PATH: process.env.PATH, HOME: path.join(F, "home"), NIGHT_SHIFT_TMP: tmp, NIGHT_SHIFT_CLAUDE: fakeFor(JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty" })), ANTHROPIC_API_KEY: "sk-ant-api03-canary" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -118,8 +118,6 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   ok((await claudeVersion(path.join(F, "nope"), env, F)).why === "missing", "a missing Claude Code is reported");
   const managedFile = path.join(F, "managed-settings.json"); writeFileSync(managedFile, "{}");
   ok(!managedSettings([managedFile]).ok && managedSettings([path.join(F, "absent.json")]).ok, "organization-managed settings stop the run; none present passes");
-  const inc = includedUsageOnly({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" });
-  ok(!inc.ok && inc.why === "extra_usage_unverified" && /Nothing was charged/.test(inc.say), "without proof that paid extra usage is off, the run doesn't start");
   const cx = await codexState(fake("codex", 'case "$1" in --version) echo "codex-cli 0.163.0";; login) echo "Logged in using ChatGPT";; *) touch "' + started + '";; esac'), env, F);
   ok(!cx.ok && cx.why === "codex_unsupported" && cx.auth === "chatgpt" && cx.version === "0.163.0" && /personal Codex instructions/.test(cx.say), "Codex signed in with ChatGPT is still refused, with the reasons");
 
@@ -127,11 +125,15 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   const launch = (args, extra) => new Promise(r => { const p = spawn(process.execPath, [bridge, ...args], { env: { PATH: process.env.PATH, HOME: path.join(F, "home"), NIGHT_SHIFT_TMP: tmp, ...extra }, stdio: ["ignore", "pipe", "pipe"] }); let out = ""; p.stdout.on("data", d => out += d); p.on("exit", code => r({ code, out })); });
   const c = await launch(["start", "--ai", "codex"], { NIGHT_SHIFT_CODEX: path.join(F, "codex") });
   ok(c.code === 5 && /doesn't run on Codex yet/.test(c.out) && !existsSync(started) && readdirSync(tmp).length === 0, "start --ai codex stops before any session or folder");
-  const goodClaude = fake("claude-ok", 'case " $* " in *" --version "*) echo "2.1.299 (Claude Code)";; *" auth status "*) echo \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}\';; *) touch "' + started + '";; esac');
+  const goodClaude = fake("claude-ok", 'case " $* " in *" --version "*) echo "2.1.299 (Claude Code)";; *" auth status "*) echo \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}\';; *) echo inference >> "' + started + '";; esac');
   const p = await launch(["start"], { NIGHT_SHIFT_CLAUDE: goodClaude });
-  ok(p.code === 4 && /included usage/.test(p.out) && !existsSync(started) && readdirSync(tmp).length === 0, "Claude Code on a Max plan still stops at the included-usage check, before any session or folder");
+  ok(p.code === 0 && readFileSync(started, "utf8").trim() === "inference" && readdirSync(tmp).length === 0, "a verified Max login reaches the stub once without any extra-usage setting or bypass flag; run folders are cleaned up");
+  ok(/enabled extra usage|enabled extra/i.test(p.out) && /additional charges/.test(p.out) && /does not change those settings or switch to API-key billing/.test(p.out) && p.out.indexOf("additional charges") < p.out.indexOf("starting in a new empty folder"), "the contributor's possible overflow charges and unchanged settings are disclosed before the run starts");
   const w = await launch(["start", "--weekly"], { NIGHT_SHIFT_CLAUDE: goodClaude });
-  ok(w.code === 0 && /not starting/.test(w.out) && !existsSync(started), "a weekly start with no Join weekly on record does nothing and runs no checks or model");
+  ok(w.code === 0 && /not starting/.test(w.out) && readFileSync(started, "utf8").trim() === "inference", "a weekly start with no Join weekly on record adds no checks or model invocation");
+  const limited = fake("claude-limited", 'case " $* " in *" --version "*) echo "2.1.299 (Claude Code)";; *" auth status "*) echo \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}\';; *) echo limited >> "' + started + '"; echo \'{"type":"result","is_error":true,"result":"Usage limit reached"}\'; exit 1;; esac');
+  const limitedRun = await launch(["start"], { NIGHT_SHIFT_CLAUDE: limited });
+  ok(limitedRun.code === 1 && readFileSync(started, "utf8").trim() === "inference\nlimited" && readdirSync(tmp).length === 0 && /provider rejected further usage/.test(limitedRun.out) && /doesn't retry or switch accounts or API keys/.test(limitedRun.out), "a provider usage rejection still exits after one stub invocation, with no retry or fallback and no remaining run folder");
   const sc = await launch(["schedule", "--ai", "codex", "--tool", "https://codeload.github.com/commonwealthswarm/night-shift-tools/tar.gz/" + "a".repeat(40)], {});
   ok(sc.code === 5 && !existsSync(path.join(F, "home", ".nightshift", "schedule")), "no weekly schedule is written for Codex");
 }
@@ -278,7 +280,7 @@ else {
 
   const limited = await scenario("usage limit", [J, CHECK_IN, { usage_limit: true }, WRITE]);
   const limitedRep = localReport(limited, "-ended.json");
-  ok(limitedRep?.ended === "usage_limit" && limitedRep.server_confirmed === true && /usage limit/.test(limited.out) && limited.runs?.runs[0]?.stop_kind === "usage_limit" && !wroteAfter(limited) && await accessClosed(limited, limitedRep), "at the plan's usage limit the run ends and closes on the server, with no retry or other credential");
+  ok(limitedRep?.ended === "usage_limit" && limitedRep.server_confirmed === true && /usage limit/.test(limited.out) && limited.runs?.runs[0]?.stop_kind === "usage_limit" && !wroteAfter(limited) && await accessClosed(limited, limitedRep), "on a provider usage rejection the run ends and closes on the server, with no retry or other credential");
 
   // Claude Code path end to end: setup, report, explicit weekly choice, then a schedule written but not installed.
   const key = clean.me.page_url.split("#key=")[1];

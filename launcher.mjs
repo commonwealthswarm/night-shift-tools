@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir, homedir } from "node:os";
 import { join, resolve, sep, isAbsolute, dirname, basename } from "node:path";
 import { createInterface } from "node:readline";
-import { claudeVersion, managedSettings, includedUsageOnly, codexState, USAGE_LIMIT } from "./providers.mjs";
+import { claudeVersion, managedSettings, SUBSCRIPTION_USAGE_NOTICE, codexState, USAGE_LIMIT } from "./providers.mjs";
 import { fileURLToPath } from "node:url";
 
 export const RUNTIME = "claude-restricted/1";
@@ -55,7 +55,7 @@ export async function preflight(bin, env, cwd, settings = "{}") {
   if (!st.loggedIn || st.authMethod === "none") return { ok: false, why: "signed_out", say: "Claude Code isn't signed in. Run claude, sign in with your Claude subscription, then run this line again." };
   if (!SUBSCRIPTION_METHODS.has(st.authMethod) || st.apiProvider !== "firstParty") {
     const what = st.authMethod === "api_key" || st.authMethod === "api_key_helper" ? `an API key${st.apiKeySource ? ` (${String(st.apiKeySource).slice(0, 60)})` : ""}, which is billed per use` : st.authMethod === "third_party" || st.apiProvider !== "firstParty" ? "a cloud provider account" : "a sign-in Night Shift can't confirm is a subscription";
-    return { ok: false, why: "not_subscription", method: st.authMethod || null, provider: st.apiProvider || null, say: `Claude Code in Terminal is signed in with ${what}. Night Shift runs only on a Claude subscription and never falls back to paid API use, so it didn't start. Being signed in to the Claude desktop app doesn't sign Terminal in. To switch Terminal to your subscription, run this yourself: claude auth login --claudeai (Night Shift never signs in for you), then run this line again. Even then, runs stay off: Night Shift also has to confirm a run stays within your plan's included usage, and it can't currently check your account's Usage credits setting from this computer.` };
+    return { ok: false, why: "not_subscription", method: st.authMethod || null, provider: st.apiProvider || null, say: `Claude Code in Terminal is signed in with ${what}. Night Shift runs only on a Claude subscription and never falls back to paid API use, so it didn't start. Being signed in to the Claude desktop app doesn't sign Terminal in. To switch Terminal to your subscription, run this yourself: claude auth login --claudeai (Night Shift never signs in for you), then run this line again. Your subscription's extra-usage settings remain your choice; enabled extra usage may incur additional charges.` };
   }
   const plan = String(st.subscriptionType || "").toLowerCase();
   if (!ELIGIBLE_PLANS.has(plan)) return { ok: false, why: "plan", plan: plan || null, say: `Night Shift couldn't confirm a Claude Pro, Max, Team or Enterprise plan on this sign-in${plan ? ` (it reports "${plan}")` : ""}, so it didn't start. It never falls back to paid API use.` };
@@ -159,7 +159,7 @@ export async function closeOnServer(ctl, route, category) {
 }
 
 export function endMessage(why, ended) {
-  const what = why === "time" ? "The run reached its time limit and was ended." : why === "cancel" ? "The run was cancelled." : why === "usage_limit" ? "The run stopped at your plan's usage limit. Night Shift doesn't retry or switch to paid use." : "The run ended without its report.";
+  const what = why === "time" ? "The run reached its time limit and was ended." : why === "cancel" ? "The run was cancelled." : why === "usage_limit" ? "The provider rejected further usage at its usage limit. Night Shift doesn't retry or switch accounts or API keys." : "The run ended without its report.";
   if (ended.confirmed) return `Night Shift: ${what} The server confirmed the run's access is closed.`;
   if (ended.why === "no_run") return `Night Shift: ${what} It hadn't started on the server, so no access had been given.`;
   return `Night Shift: ${what} Its server couldn't confirm that the run's access is closed; it closes by itself at the run's time limit. The details are saved in ~/.nightshift/reports.`;
@@ -206,7 +206,7 @@ export async function checks(ai, bin, env, settings) {
     const r = await step();
     if (!r.ok) return r;
   }
-  return includedUsageOnly();
+  return { ok: true, say: SUBSCRIPTION_USAGE_NOTICE };
 }
 
 export async function start(argv) {
@@ -223,6 +223,7 @@ export async function start(argv) {
   else {
     const check = await checks(ai, bin, runEnv(process.env, {}), runSettings(self));
     if (!check.ok) { say("Night Shift: " + check.say); return ai === "codex" ? 5 : 4; }
+    say(check.say);
   }
   const base = realpathSync(process.env.NIGHT_SHIFT_TMP || tmpdir());
   const runDir = mkdtempSync(join(base, RUN_PREFIX)), ctl = mkdtempSync(join(base, CTL_PREFIX));

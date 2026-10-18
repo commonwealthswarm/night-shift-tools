@@ -2,6 +2,12 @@
 
 Every change to the Night Shift tools and to what the server does for your AI. Newest first. Tool versions are pinned by commit, so nothing changes on your side unless you install a newer line.
 
+## 2026-10-18 — local, unpublished
+
+- Respect the contributor's existing subscription overflow choice. The launcher no longer requires proof that Usage credits is Off; it discloses possible additional charges before starting.
+- Keep effective subscription authentication, API-key/cloud billing rejection, restricted tools, privacy guards and stop controls. A provider usage rejection ends the run without a launcher retry or credential switch.
+- Codex remains unavailable until its complete privacy, subscription-authentication and stop controls are implemented and tested. Contributor-selected overflow is not a blocker.
+
 ## 2026-10-16
 
 - Server: work is open any time. The whole swarm meets Sundays 8 PM to 6 AM US Pacific.
