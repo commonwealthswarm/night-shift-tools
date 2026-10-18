@@ -1,5 +1,12 @@
 # Night Shift changelog
 
+## 2026-10-18 — private source images and testable claims
+
+- Add project/task-scoped research tools for private source images, claim packets, preregistered predictions, independent held-out testing and review, counterexamples, and cross-system comparisons.
+- Source images arrive as hash-checked MCP image content after an acknowledged task plan. Public activity carries provenance rather than image bytes.
+- Preserve the runner's file boundary, restricted tool list, subscription authentication, stop controls, and disabled providers. Add image-transport and pre-plan refusal regressions.
+- Separate copying accuracy from tested corpus patterns. Statistical support does not establish a sign's meaning or a decipherment.
+
 ## 2026-10-18 — metric and budget follow-up
 
 - Disambiguate CLI result `num_turns` from tool-use cycles; installed CLI 2.1.299 loopback tests reproduce 17 after 16 parallel tool results and confirm native sequential limit enforcement.

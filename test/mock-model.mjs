@@ -6,6 +6,16 @@ const [port, logFile, planJson] = process.argv.slice(2);
 const plan = JSON.parse(planJson);
 let step = 0, n = 0, ids = 0;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+function heldTask(messages) {
+  const uses = new Map(), found = {};
+  for (const m of messages) for (const c of Array.isArray(m.content) ? m.content : []) {
+    if (c.type === "tool_use") uses.set(c.id, c.name);
+    if (c.type !== "tool_result" || !/next_task$/.test(uses.get(c.tool_use_id) || "")) continue;
+    const text = typeof c.content === "string" ? c.content : (Array.isArray(c.content) ? c.content : []).map(x => x.text || "").join("");
+    try { const r = JSON.parse(text); if (r.task?.id) { found.task_id = r.task.id; found.project_id = r.project_id || r.task.project_id; } } catch {}
+  }
+  return found;
+}
 function sse(res, blocks, stop) {
   res.writeHead(200, { "content-type": "text/event-stream" });
   const ev = (t, d) => res.write(`event: ${t}\ndata: ${JSON.stringify({ type: t, ...d })}\n\n`);
@@ -37,7 +47,10 @@ http.createServer((req, res) => {
     if (p && p.usage_limit) { res.writeHead(429, { "content-type": "application/json", "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600), "retry-after": "3600" }); return res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Usage limit reached for this plan." } })); }
     step++;
     if (!p) return reply([{ type: "text", text: "done" }], "end_turn");
-    const calls = (Array.isArray(p) ? p : [p]).map(c => ({ type: "tool_use", id: c.id || "toolu_" + ++ids, name: c.name, input: c.input || {} }));
+    // "$PROJECT" and "$TASK" in an input stand for the task the latest next_task result handed out.
+    const held = heldTask(b.messages || []);
+    const fill = v => typeof v === "string" ? v.replaceAll("$PROJECT", held.project_id ?? "$PROJECT").replaceAll("$TASK", held.task_id ?? "$TASK") : v && typeof v === "object" ? (Array.isArray(v) ? v.map(fill) : Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x)]))) : v;
+    const calls = (Array.isArray(p) ? p : [p]).map(c => ({ type: "tool_use", id: c.id || "toolu_" + ++ids, name: c.name, input: fill(c.input || {}) }));
     reply(calls, "tool_use");
   });
 }).listen(Number(port), "127.0.0.1");

@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { judge, scanTranscript, teardown, identity, runEnv, testMode, preflight, RUN_PREFIX, trip, stopMessage, scheduleSpec, plistFor, cronFor } from "../launcher.mjs";
 import { claudeVersion, managedSettings, codexState } from "../providers.mjs";
+import { fixturePng, fixturePixels, decodePng, samePixels, sha256 as sha256Hex, FIXTURE_W, FIXTURE_H } from "./png-fixture.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bridge = path.join(here, "..", "bridge.mjs");
@@ -250,6 +251,46 @@ else {
   ok(!/CANARY-(USER-MEMORY|ENV-KEY|HELPER-KEY|PERSONAL-FILE)/.test(clean.all), "no personal memory, environment key, helper key or file reaches the model");
   ok(["USER-HOOK-RAN", "USER-MCP-RAN", "APIKEYHELPER-RAN", "NODE-OPTIONS-RAN"].every(f => !existsSync(path.join(clean.F, f))), "the person's own hooks, MCP servers, key helper and NODE_OPTIONS don't run");
   ok(clean.tmpLeft.length === 0 && clean.reports.length === 1, "teardown deletes the run and control folders and keeps the report");
+
+  // Private source images reach the model as pixels through the same restricted runner, bridge and MCP path.
+  // A synthetic PNG (not an Indus source) is uploaded to the local test API; the model asks for it by id.
+  {
+    const png = fixturePng("e2e-research-page"), b64 = png.toString("base64"), hash = sha256Hex(png), probe = b64.slice(20, 80);
+    // Images are bound to a research project and served only inside a held task with an acknowledged plan, so the
+    // test seeds an indus-script project with a task and gives every open indus-script project its own copy of the
+    // image ("ast_e2e-<project>"); the mock fills in whichever task next_task hands out.
+    const admin = body => ({ method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + (process.env.ADMIN_KEY || "t") }, body: JSON.stringify(body) });
+    const seedId = "e2e-img-" + Date.now().toString(36);
+    const seeded = await (await fetch(SITE + "/api/admin/projects", admin({ id: seedId, mission: "indus-script", title: "Synthetic e2e image project", summary: "Local test only", seed: [{ key: "look", kind: "work", title: "Look at the synthetic image", points: 1, spec: "Test task for the runner's image path." }] }))).json();
+    ok(seeded.ok && !seeded.repo, "the test API creates a local research project with a task (no repository)");
+    const indus = (await (await fetch(SITE + "/api/public/projects")).json()).projects.filter(p => p.mission === "indus-script" && /^[a-z0-9-]{1,50}$/.test(p.id));
+    const upload = await (await fetch(SITE + "/api/admin/assets", admin({ assets: indus.map(p => ({ id: "e2e-" + p.id, project_id: p.id, kind: "pdf_page", source_title: "Synthetic e2e source (not Indus)", source_sha256: "d".repeat(64), source_pages: 1, physical_page: 1, content_note: "Synthetic fixture image for the runner test.", mime: "image/png", sha256: hash, bytes_b64: b64, rights: "test fixture", privacy: "private-research-only" })) }))).json();
+    ok(upload.ok && upload.saved.length === indus.length && indus.some(p => p.id === seedId), "the test API accepts the synthetic research image, bound to each research project");
+    const R = { project_id: "$PROJECT", task_id: "$TASK" };
+    const NEXT = { id: "toolu_next", name: "mcp__night-shift__next_task", input: {} };
+    const EARLY = { id: "toolu_early", name: "mcp__night-shift__view_source_image", input: { ...R, asset_id: "ast_e2e-$PROJECT", expect_sha256: hash } };
+    const PLAN = { id: "toolu_plan", name: "mcp__night-shift__post_note", input: { ...R, type: "plan", body: "Look at the synthetic image and describe it." } };
+    const VIEW = { id: "toolu_view", name: "mcp__night-shift__view_source_image", input: { ...R, asset_id: "ast_e2e-$PROJECT", expect_sha256: hash } };
+    const WRONG = { id: "toolu_wrong", name: "mcp__night-shift__view_source_image", input: { ...R, asset_id: "ast_e2e-$PROJECT", expect_sha256: "e".repeat(64) } };
+    const OUT = { id: "toolu_outside", name: "Read", input: { file_path: "$HOME/Documents/secret.txt" } };
+    const seen = await scenario("source image", [J, CHECK_IN, NEXT, EARLY, PLAN, VIEW, WRONG, { name: "mcp__night-shift__report", input: {} }]);
+    // Find what Claude Code actually sent the model as each tool result.
+    const resultFor = id => { for (const l of seen.main) { let b; try { b = JSON.parse(l.raw); } catch { continue; } for (const m of b.messages || []) for (const c of (Array.isArray(m.content) ? m.content : [])) if (c.type === "tool_result" && c.tool_use_id === id) return c; } return null; };
+    const imagesIn = c => (Array.isArray(c?.content) ? c.content : []).filter(x => x.type === "image");
+    const got = imagesIn(resultFor("toolu_view"));
+    let pixelsMatch = false;
+    try { pixelsMatch = got.length === 1 && samePixels(decodePng(Buffer.from(got[0].source?.data || got[0].data || "", "base64")), FIXTURE_W, FIXTURE_H, fixturePixels("e2e-research-page")); } catch {}
+    ok(seen.code === 0 && pixelsMatch, "the model received the image's actual pixels through the restricted runner (decoded and compared)");
+    ok(imagesIn(resultFor("toolu_early")).length === 0 && resultFor("toolu_early")?.is_error === true && /plan_required/.test(JSON.stringify(resultFor("toolu_early")?.content)), "before the task's plan is acknowledged, the model gets no image");
+    ok(imagesIn(resultFor("toolu_wrong")).length === 0 && resultFor("toolu_wrong")?.is_error === true, "asking with the wrong hash gives the model no image");
+    ok(!seen.out.includes(probe), "the launcher's own output never prints the image bytes");
+    const live = await (await fetch(`${SITE}/api/public/live/${seen.me.handle}`)).json();
+    ok(!JSON.stringify(live).includes(probe) && live.events.some(e => e.preview?.source_image?.sha256 === hash), "the public live log records the image's hash, not its bytes");
+    ok(seen.tmpLeft.length === 0, "nothing from the image is left in a run folder");
+    // The boundary is unchanged: reading a file outside the run folder still ends the run, even with images available.
+    const still = await scenario("source image boundary", [J, CHECK_IN, OUT, VIEW]);
+    ok(still.code === 3 && !still.main.some(l => l.raw.includes(probe)), "an outside-folder read still stops the run, and no image is served after it");
+  }
   ok(!existsSync(path.join(clean.F, "home", ".claude", "projects")) || readdirSync(path.join(clean.F, "home", ".claude", "projects"), { recursive: true }).filter(f => String(f).endsWith(".jsonl")).length === 0, "the session isn't saved to the person's Claude folder");
 
   const seq = await scenario("sequential", [J, CHECK_IN, { name: "Read", input: { file_path: "$HOME/Documents/secret.txt" } }, WRITE]);

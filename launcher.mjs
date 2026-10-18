@@ -15,7 +15,11 @@ const SITE = process.env.NIGHT_SHIFT_SITE || "https://nightshiftswarm.pages.dev"
 const FILE_TOOLS = new Set(["Read", "Write", "Edit", "Glob", "Grep"]);
 const SERVER = "night-shift";
 // The exact Night Shift tools a run may call. Any other name, even under the night-shift prefix, ends the run.
-export const NIGHT_SHIFT_TOOLS = new Set(["join", "check_in", "next_task", "read_task", "feed", "post_note", "heartbeat", "checkpoint", "submit", "split", "read_files", "query_data", "checks", "review", "narrate", "await_choice", "record_choice", "request_source", "status", "report", "list_sources", "read_source", "submit_readings", "readings_to_check", "check_readings"]);
+export const NIGHT_SHIFT_TOOLS = new Set(["join", "check_in", "next_task", "read_task", "feed", "post_note", "heartbeat", "checkpoint", "submit", "split", "read_files", "query_data", "checks", "review", "narrate", "await_choice", "record_choice", "request_source", "status", "report", "list_sources", "read_source", "submit_readings", "readings_to_check", "check_readings",
+  // Indus research tools: server-side only. Images arrive as MCP image content from view_source_image; the run still
+  // can't open files outside its folder, fetch URLs or run commands.
+  "research_requirements", "list_source_images", "view_source_image", "list_claim_packets", "create_claim_packet", "add_prediction", "preregister_packet",
+  "run_prediction", "reproduce_prediction", "report_counterexample", "review_counterexample", "review_claim_packet", "submit_comparison", "comparisons_to_review", "review_comparison"]);
 const WRITE_TOOLS = new Set(["Write", "Edit"]);
 // Settings and tool config a session could pick up from its folder. Nothing launcher-owned lives in the folder.
 const PROTECTED = /(^|\/)(\.claude|\.mcp\.json|\.night-shift[^/]*|CLAUDE\.md|CLAUDE\.local\.md|\.git)(\/|$)/i;
