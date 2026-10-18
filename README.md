@@ -15,3 +15,7 @@ If your CLI reports API authentication, complete the official `claude auth login
 Claude Code's local privacy and lifecycle controls were tested on macOS with Claude Code 2.1.299 using synthetic files and loopback models. Real research acceptance is separate. Codex, Gemini, chat paste and cloud routines remain unavailable. The experimental Codex context helper is not a full runner and is not used by the launcher.
 
 Weekly participation requires an explicit choice after the first report. `schedule` writes a file for review; it never installs it. Neither a saved weekly choice nor a saved reminder preference starts a schedule or sends an email.
+
+## Supervised local acceptance test
+
+`start --supervised` requires a loopback `NIGHT_SHIFT_SITE` and an absolute `NIGHT_SHIFT_STATE_DIR`. The separate directory holds only the fixture identity and reports; HOME and Claude authentication stay unchanged. This mode still performs every subscription, version, managed-settings and privacy check. It uses Haiku at low effort, at most 16 turns and 120 seconds (or a shorter `NIGHT_SHIFT_LIMIT_SECONDS`), with zero configured API retries, no streaming fallback and a requested 2,048-token output limit per response. It disables browser opening, completes one small task, and refuses another check-in or weekly choice after the report. These limits are not a dollar cap; enabled subscription overflow can still cost money.

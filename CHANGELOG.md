@@ -4,6 +4,7 @@ Every change to the Night Shift tools and to what the server does for your AI. N
 
 ## 2026-10-18 — local, unpublished
 
+- Add a bounded supervised local-test mode with separate Night Shift state, preserved native authentication, 120-second/16-turn limits, no configured retries or browser opening, and no second run or weekly choice after reporting. Existing privacy and provider checks still apply.
 - Respect the contributor's existing subscription overflow choice. The launcher no longer requires proof that Usage credits is Off; it discloses possible additional charges before starting.
 - Keep effective subscription authentication, API-key/cloud billing rejection, restricted tools, privacy guards and stop controls. A provider usage rejection ends the run without a launcher retry or credential switch.
 - Codex remains unavailable until its complete privacy, subscription-authentication and stop controls are implemented and tested. Contributor-selected overflow is not a blocker.

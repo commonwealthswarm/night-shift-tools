@@ -5,6 +5,7 @@ import { join, resolve, sep, isAbsolute, dirname, basename } from "node:path";
 import { createInterface } from "node:readline";
 import { claudeVersion, managedSettings, SUBSCRIPTION_USAGE_NOTICE, codexState, USAGE_LIMIT } from "./providers.mjs";
 import { fileURLToPath } from "node:url";
+import { stateDir } from "./state.mjs";
 
 export const RUNTIME = "claude-restricted/1";
 export const RUN_PREFIX = "night-shift-run-";
@@ -28,7 +29,7 @@ const REASONS = {
 // services, proxies, NODE_OPTIONS and every other variable stay behind.
 // No API keys, bearer tokens, OAuth token variables, profiles, model redirects or cloud-provider switches: the run
 // signs in only with the person's own saved Claude subscription login, and the preflight below checks that.
-const PASS_ENV = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "NIGHT_SHIFT_SITE", "NIGHT_SHIFT_NO_OPEN"];
+const PASS_ENV = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "NIGHT_SHIFT_SITE", "NIGHT_SHIFT_NO_OPEN", "NIGHT_SHIFT_STATE_DIR"];
 // Test mode only, against a fake model on this machine: a fake key and a loopback address (see testMode).
 const PASS_TEST_ENV = ["NIGHT_SHIFT_AUDIT", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER"];
 
@@ -72,11 +73,12 @@ export function runEnv(parent, extra) {
 
 export const runSettings = self => JSON.stringify({ hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `"${process.execPath}" "${self}" guard` }] }] } });
 
-export function claudeArgs(self, runDir, prompt) {
+export function claudeArgs(self, runDir, prompt, { supervised = false } = {}) {
   const node = process.execPath;
   const mcp = { mcpServers: { [SERVER]: { command: node, args: [self] } } };
   return ["-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--restricted", "--tools", [...FILE_TOOLS].join(","), "--strict-mcp-config", "--mcp-config", JSON.stringify(mcp),
-    "--settings", runSettings(self), "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--allowedTools", "mcp__" + SERVER];
+    "--settings", runSettings(self), "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--allowedTools", "mcp__" + SERVER,
+    ...(supervised ? ["--model", "haiku", "--effort", "low", "--max-turns", "16", "--no-chrome"] : [])];
 }
 
 // Resolves through symlinks: the nearest existing ancestor is made real, so a link inside the folder can't point out of it.
@@ -188,7 +190,7 @@ export function teardown(dir, base, prefix, id) {
 // A closed Terminal can make writes fail; cleanup must go on regardless.
 function say(text) { try { process.stdout.write(text + "\n"); } catch {} }
 
-const readMe = () => { try { return JSON.parse(readFileSync(join(homedir(), ".nightshift", "me.json"), "utf8")); } catch { return null; } };
+const readMe = () => { try { return JSON.parse(readFileSync(join(stateDir(), "me.json"), "utf8")); } catch { return null; } };
 
 // Asks the server whether a weekly run may start now: Join weekly chosen, the swarm live, not already run this week.
 export async function weeklyReady(me) {
@@ -211,6 +213,11 @@ export async function checks(ai, bin, env, settings) {
 
 export async function start(argv) {
   const self = fileURLToPath(new URL("./bridge.mjs", import.meta.url));
+  const supervised = argv.includes("--supervised");
+  try { stateDir(); } catch (e) { say("Night Shift: " + e.message); return 2; }
+  if (supervised && (!process.env.NIGHT_SHIFT_STATE_DIR || !/^http:\/\/127\.0\.0\.1:\d+$/.test(process.env.NIGHT_SHIFT_SITE || "") || argv.includes("--weekly"))) {
+    say("Night Shift: a supervised test needs a separate state directory and loopback API, and cannot be weekly."); return 2;
+  }
   const ai = argv.includes("--ai") ? argv[argv.indexOf("--ai") + 1] : "claude";
   if (!["claude", "codex"].includes(ai)) { say(`Night Shift: "${ai}" isn't a supported AI. Use claude or codex.`); return 2; }
   const mode = testMode(process.env), bin = ai === "codex" ? process.env.NIGHT_SHIFT_CODEX || "codex" : process.env.NIGHT_SHIFT_CLAUDE || "claude";
@@ -232,21 +239,31 @@ export async function start(argv) {
   try {
   const me = readMe();
   const workMin = me ? (me.hours || 2) * 60 : 15;
-  const limitMs = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000 || (workMin + 5) * 60_000;
+  const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
+  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + 5) * 60_000;
   const weekly = argv.includes("--weekly");
   const h = Number(argv[argv.indexOf("--hours") + 1]);
   const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
-  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.`;
-  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`);
-  const env = runEnv(process.env, { NIGHT_SHIFT_CTL: ctl, NIGHT_SHIFT_RUN_DIR: runDir });
-  const child = spawn(bin, claudeArgs(self, runDir, prompt), { cwd: runDir, env, stdio: ["ignore", "pipe", "inherit"] });
-  let why = null, finalText = null;
+  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? " This is one supervised local test, limited to 16 turns and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session." : "");
+  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds and 16 agentic turns, then up to 3 seconds for forced termination. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  const env = runEnv(process.env, { NIGHT_SHIFT_CTL: ctl, NIGHT_SHIFT_RUN_DIR: runDir, ...(supervised ? {
+    NIGHT_SHIFT_SINGLE_RUN: "1", NIGHT_SHIFT_NO_OPEN: "1", CLAUDE_CODE_MAX_RETRIES: "0",
+    CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "2048",
+    CLAUDE_CODE_DISABLE_FAST_MODE: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_ARTIFACT_AUTO_OPEN: "0",
+  } : {}) });
+  const child = spawn(bin, claudeArgs(self, runDir, prompt, { supervised }), { cwd: runDir, env, stdio: ["ignore", "pipe", "inherit"] });
+  let why = null, finalText = null, providerResult = null;
   const stop = reason => { if (!why) { why = reason; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 3000).unref(); } };
   const root = realpathSync(runDir);
   // The stream shows every tool use the model asks for, so a disabled or unknown tool ends the run even though no hook runs for it.
   createInterface({ input: child.stdout }).on("line", async line => {
     let m; try { m = JSON.parse(line); } catch { return; }
-    if (m.type === "result") { finalText = m.result || null; if (m.is_error && USAGE_LIMIT.test(String(m.result || "") + " " + String(m.subtype || ""))) why ||= "usage_limit"; }
+    if (m.type === "result") {
+      finalText = m.result || null;
+      if (supervised) providerResult = { subtype: m.subtype, is_error: m.is_error, num_turns: m.num_turns, duration_ms: m.duration_ms, duration_api_ms: m.duration_api_ms, usage: m.usage, model_usage: m.modelUsage, estimated_list_price_usd: m.total_cost_usd, estimate_is_actual_subscription_charge: false };
+      if (m.is_error && USAGE_LIMIT.test(String(m.result || "") + " " + String(m.subtype || ""))) why ||= "usage_limit";
+    }
     if (m.type !== "assistant" || !Array.isArray(m.message?.content)) return;
     // Sessions aren't saved to disk, so this log is the guard's record of every tool use the model asked for.
     if (m.message.content.some(c => c.type === "tool_use")) writeFileSync(join(ctl, "attempts.jsonl"), JSON.stringify({ type: "assistant", message: { content: m.message.content.filter(c => c.type === "tool_use") } }) + "\n", { flag: "a", mode: 0o600 });
@@ -275,7 +292,8 @@ export async function start(argv) {
   const endCategory = why === "time" ? "time_limit" : why === "cancel" ? "cancelled" : why === "usage_limit" ? "usage_limit" : "no_report";
   const ended = !violation && !finalized ? await closeOnServer(ctl, "/api/run/end", endCategory) : null;
   const session = (() => { try { return JSON.parse(readFileSync(join(ctl, "session.json"), "utf8")).session; } catch { return null; } })();
-  const keep = join(homedir(), ".nightshift", "reports"), stamp = Date.now();
+  const keep = join(stateDir(), "reports"), stamp = Date.now();
+  if (supervised && providerResult) { mkdirSync(keep, { recursive: true, mode: 0o700 }); writeFileSync(join(keep, `${stamp}-provider.json`), JSON.stringify(providerResult, null, 2), { mode: 0o600 }); }
   if (ended) { mkdirSync(keep, { recursive: true, mode: 0o700 }); writeFileSync(join(keep, `${stamp}-ended.json`), JSON.stringify({ ended: endCategory, at: Date.now(), session, server_confirmed: !!ended.confirmed, detail: ended.why || null }, null, 2), { mode: 0o600 }); }
   if (existsSync(join(ctl, "report.json")) || violation) mkdirSync(keep, { recursive: true, mode: 0o700 });
   if (existsSync(join(ctl, "report.json"))) copyFileSync(join(ctl, "report.json"), join(keep, `${stamp}.json`));
@@ -337,7 +355,7 @@ export async function schedule(argv) {
   if (w.choice !== "weekly") { say("Night Shift: your page doesn't show Join weekly, so no schedule was written."); return 3; }
   const plan = scheduleSpec(tool, process.env);
   if (!plan.ok) { say("Night Shift: " + plan.say); return 4; }
-  const dir = join(homedir(), ".nightshift", "schedule");
+  const dir = join(stateDir(), "schedule");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let file, how;
   if (process.platform === "darwin") {

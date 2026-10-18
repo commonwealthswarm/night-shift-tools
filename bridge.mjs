@@ -3,8 +3,8 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { stateDir } from "./state.mjs";
 
 const MODE = process.argv[2];
 if (MODE === "start" || MODE === "guard" || MODE === "schedule") {
@@ -16,7 +16,7 @@ if (MODE === "start" || MODE === "guard" || MODE === "schedule") {
 
 const SITE = process.env.NIGHT_SHIFT_SITE || "https://nightshiftswarm.pages.dev";
 const BASE = SITE + "/api/mcp/";
-const DIR = join(homedir(), ".nightshift");
+const DIR = stateDir();
 const UA = { "user-agent": "night-shift-tools/1.0" };
 // Set only when the launcher started this bridge inside its restricted run; the server refuses runs without it.
 const CTL = process.env.NIGHT_SHIFT_CTL || null;
@@ -77,6 +77,7 @@ async function handle(msg) {
   if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools: await remoteTools() } });
   if (msg.method === "ping") return send({ jsonrpc: "2.0", id: msg.id, result: {} });
   if (msg.method !== "tools/call") return send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
+  if (runDone && process.env.NIGHT_SHIFT_SINGLE_RUN === "1" && msg.params?.name !== "report") return text(msg.id, "This supervised run has reported and is finished. Do not start another run or record a weekly choice. End now.", true);
   const args = { ...(msg.params?.arguments || {}) };
   if (msg.params?.name === "join") return joinNow(msg.id, args);
   const isCheckIn = msg.params?.name === "check_in";
