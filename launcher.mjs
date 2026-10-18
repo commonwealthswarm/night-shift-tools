@@ -267,9 +267,10 @@ export async function start(argv) {
     CLAUDE_CODE_DISABLE_FAST_MODE: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_ARTIFACT_AUTO_OPEN: "0",
   } : {}) });
-  // Open the person's page as soon as it is known: now if this computer joined before, or once the first join saves it.
+  // A confirmed check-in is the page's reason to watch. Opening before it exists would require idle discovery polling.
   let pageShown = false;
   const showPage = () => {
+    if (!existsSync(join(ctl, "session.json"))) return;
     // Computers that joined with an older version saved only the AI's name, so open its public page instead.
     const me = readMe(), url = me?.page_url || (/^[a-z]+-[a-z]+-\d{3}$/.test(me?.handle || "") ? `${SITE}/ai/${me.handle}` : null);
     if (pageShown || !url) return;
@@ -309,6 +310,7 @@ export async function start(argv) {
   const signals = ["SIGINT", "SIGTERM", "SIGHUP"].map(sig => { const f = () => stop("cancel"); process.on(sig, f); return [sig, f]; });
   const watch = setInterval(() => { if (existsSync(join(ctl, "violation.json"))) stop("violation"); }, 250);
   const code = await new Promise(r => { child.on("exit", c => r(c)); child.on("error", () => r(127)); });
+  showPage();
   clearInterval(pageWatch);
   for (const [sig, f] of signals) process.off(sig, f);
   await new Promise(r => setTimeout(r, 200));

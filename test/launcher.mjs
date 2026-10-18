@@ -339,7 +339,7 @@ else {
     ok(wk.code === 0 && /Not swarm time/.test(wk.out), "outside the Sunday swarm the scheduled start checks with the server and starts nothing");
   }
 
-  // The launcher opens the person's page itself, once, as soon as the first join saves it; Terminal shows it without the key.
+  // The page opens only after a successful check-in: no browser polling is needed to discover an unstarted run.
   const openerDir = fixture(), openedLog = path.join(openerDir, "opened.txt"), opener = path.join(openerDir, "opener.sh");
   writeFileSync(opener, `#!/bin/sh\necho "$1" >> "${openedLog}"\n`); chmodSync(opener, 0o755);
   const opens = await scenario("opens page", [J, CHECK_IN, { name: "mcp__night-shift__narrate", input: { text: "working" } }, { sleep: 2500 }, { name: "mcp__night-shift__report", input: {} }], { env: { NIGHT_SHIFT_NO_OPEN: "0", NIGHT_SHIFT_OPENER: opener } });
@@ -349,9 +349,16 @@ else {
 
   // A computer that joined with an older version saved no page link: the launcher opens the AI's public page.
   const legacyJoin = await (await fetch(SITE + "/api/join", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mission: "indus-script", hours: 1 }) })).json();
+  const noStartLog = path.join(openerDir, "not-started.txt"), noStartOpener = path.join(openerDir, "not-started.sh");
+  writeFileSync(noStartOpener, `#!/bin/sh\necho "$1" >> "${noStartLog}"\n`); chmodSync(noStartOpener, 0o755);
+  await scenario("joined without check-in", [J, { sleep: 1500 }], { env: { NIGHT_SHIFT_NO_OPEN: "0", NIGHT_SHIFT_OPENER: noStartOpener } });
+  ok(!existsSync(noStartLog), "joining without a successful check-in opens no idle monitoring page");
+
   const legacyLog = path.join(openerDir, "opened-legacy.txt"), legacyOpener = path.join(openerDir, "opener-legacy.sh");
   writeFileSync(legacyOpener, `#!/bin/sh\necho "$1" >> "${legacyLog}"\n`); chmodSync(legacyOpener, 0o755);
   const legacy = await scenario("legacy me.json", [CHECK_IN, { name: "mcp__night-shift__report", input: {} }], { me: { token: legacyJoin.token, handle: legacyJoin.handle, agent_id: legacyJoin.agent_id, mission: "indus-script", hours: 1 }, env: { NIGHT_SHIFT_NO_OPEN: "0", NIGHT_SHIFT_OPENER: legacyOpener } });
+  // The browser opener is detached; a short run can exit before the OS schedules that process.
+  for (let i = 0; i < 40 && !existsSync(legacyLog); i++) await new Promise(r => setTimeout(r, 50));
   const legacyLines = existsSync(legacyLog) ? readFileSync(legacyLog, "utf8").trim().split("\n") : [];
   ok(legacyLines.length === 1 && legacyLines[0] === `${SITE}/ai/${legacyJoin.handle}` && legacy.out.includes("Watch your AI live: " + SITE + "/ai/" + legacyJoin.handle), "a computer that joined with an older version (no saved page link) still gets its AI's page opened");
 

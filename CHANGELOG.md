@@ -1,5 +1,10 @@
 # Night Shift changelog
 
+## Request policy — 2026-10-18
+
+The launcher now opens the live agent page only after the server confirms the run has started, including very short runs. Joining alone opens no idle monitoring page. It still opens the page once, keeps the private owner fragment out of Terminal output, and makes no network request from its local page watcher. See the application repository’s `docs/REQUEST_POLICY.md` for the complete UI/API request policy and Peter’s section guide.
+
+
 ## 2026-10-18 — private source images and testable claims
 
 - Add project/task-scoped research tools for private source images, claim packets, preregistered predictions, independent held-out testing and review, counterexamples, and cross-system comparisons.
