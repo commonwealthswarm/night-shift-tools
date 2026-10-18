@@ -97,6 +97,8 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   ];
   const results = await Promise.all(refused.map(([st]) => check(JSON.stringify(st), st.loggedIn ? 0 : 1)));
   ok(results.every((r, i) => !r.ok && refused[i][1].test(r.say) && /never falls back|isn't signed in/.test(r.say)), "API keys, key helpers, cloud providers, token variables, unknown methods and signed-out states are all refused, saying why");
+  const saved = await check(JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty", apiKeySource: "/login managed key" }));
+  ok(!saved.ok && /\/login managed key/.test(saved.say) && /desktop app doesn't sign Terminal in/.test(saved.say) && /claude auth login --claudeai/.test(saved.say) && /never signs in for you/.test(saved.say) && /Even then, runs stay off/.test(saved.say), "a saved Terminal API-key sign-in is refused with the exact sign-in step for the person, and says runs stay off after it");
   ok(!(await check("not json")).ok && !(await preflight(path.join(F, "missing"), { PATH: "/nonexistent" }, F)).ok, "unreadable status or a missing Claude Code refuses too");
   const tmp = path.join(F, "tmp"); mkdirSync(tmp);
   const run = spawn(process.execPath, [bridge, "start"], { env: { PATH: process.env.PATH, HOME: path.join(F, "home"), NIGHT_SHIFT_TMP: tmp, NIGHT_SHIFT_CLAUDE: fakeFor(JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty" })), ANTHROPIC_API_KEY: "sk-ant-api03-canary" }, stdio: ["ignore", "pipe", "pipe"] });
