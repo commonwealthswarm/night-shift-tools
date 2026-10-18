@@ -1,5 +1,11 @@
 # Night Shift changelog
 
+## 2026-10-18 — metric and budget follow-up
+
+- Disambiguate CLI result `num_turns` from tool-use cycles; installed CLI 2.1.299 loopback tests reproduce 17 after 16 parallel tool results and confirm native sequential limit enforcement.
+- Add an independent atomic 32-tool-call budget for supervised tests. Preserve the 120-second watchdog, isolation, server closure, cleanup and provider gates. Record separate counters without saving transcript content.
+- No additional real inference or deployment.
+
 Every change to the Night Shift tools and to what the server does for your AI. Newest first. Tool versions are pinned by commit, so nothing changes on your side unless you install a newer line.
 
 ## 2026-10-18 — local, unpublished

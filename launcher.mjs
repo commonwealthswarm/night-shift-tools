@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { claudeVersion, managedSettings, SUBSCRIPTION_USAGE_NOTICE, codexState, USAGE_LIMIT } from "./providers.mjs";
 import { fileURLToPath } from "node:url";
 import { stateDir } from "./state.mjs";
+import { SUPERVISED_TOOL_CALLS, reserveToolCall, admittedToolCalls, streamCounters } from "./budget.mjs";
 
 export const RUNTIME = "claude-restricted/1";
 export const RUN_PREFIX = "night-shift-run-";
@@ -23,6 +24,7 @@ const REASONS = {
   tool_not_allowed: "It tried to use a tool that Night Shift runs don't allow.",
   protected_path: "It tried to change settings or tool files that Night Shift runs don't allow.",
   personal_source: "It asked for a personal source (email, cloud files, accounts or this computer's network), which is never allowed.",
+  tool_budget: "It reached the supervised run's tool-call limit. Further tool calls are refused.",
 };
 
 // Only what Claude Code needs to start and sign in to the person's own account. Cloud keys, tokens for other
@@ -138,6 +140,7 @@ export async function guard() {
   if (ctl && runDir) {
     const root = realpathSync(runDir);
     category = existsSync(join(ctl, "violation.json")) ? "tripped" : judge(event, root) || scanTranscript(join(ctl, "attempts.jsonl"), root) || (event.transcript_path ? scanTranscript(event.transcript_path, root) : null);
+    if (!category && !reserveToolCall(ctl)) category = "tool_budget";
     if (!category) { audit("allow"); return process.exit(0); }
     category = await trip(ctl, category === "tripped" ? "tool_not_allowed" : category, event.tool_name);
   }
@@ -148,7 +151,7 @@ export async function guard() {
 }
 
 // Revocation counts only when the server says so; anything else is reported as unconfirmed.
-export const reportViolation = (ctl, category) => closeOnServer(ctl, "/api/run/violation", category);
+export const reportViolation = (ctl, category) => closeOnServer(ctl, category === "tool_budget" ? "/api/run/end" : "/api/run/violation", category);
 
 export async function closeOnServer(ctl, route, category) {
   let s;
@@ -237,6 +240,7 @@ export async function start(argv) {
   const runId = identity(runDir), ctlId = identity(ctl);
   let cleaned = false;
   try {
+  if (supervised) { const budget = join(ctl, "tool-budget"); mkdirSync(budget, { mode: 0o700 }); writeFileSync(join(budget, "limit.json"), JSON.stringify({ max_tool_calls: SUPERVISED_TOOL_CALLS }), { mode: 0o600 }); }
   const me = readMe();
   const workMin = me ? (me.hours || 2) * 60 : 15;
   const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
@@ -244,8 +248,8 @@ export async function start(argv) {
   const weekly = argv.includes("--weekly");
   const h = Number(argv[argv.indexOf("--hours") + 1]);
   const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
-  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? " This is one supervised local test, limited to 16 turns and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session." : "");
-  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds and 16 agentic turns, then up to 3 seconds for forced termination. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
+  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
   const env = runEnv(process.env, { NIGHT_SHIFT_CTL: ctl, NIGHT_SHIFT_RUN_DIR: runDir, ...(supervised ? {
     NIGHT_SHIFT_SINGLE_RUN: "1", NIGHT_SHIFT_NO_OPEN: "1", CLAUDE_CODE_MAX_RETRIES: "0",
     CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "2048",
@@ -254,11 +258,13 @@ export async function start(argv) {
   } : {}) });
   const child = spawn(bin, claudeArgs(self, runDir, prompt, { supervised }), { cwd: runDir, env, stdio: ["ignore", "pipe", "inherit"] });
   let why = null, finalText = null, providerResult = null;
+  const counters = streamCounters();
   const stop = reason => { if (!why) { why = reason; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 3000).unref(); } };
   const root = realpathSync(runDir);
   // The stream shows every tool use the model asks for, so a disabled or unknown tool ends the run even though no hook runs for it.
   createInterface({ input: child.stdout }).on("line", async line => {
     let m; try { m = JSON.parse(line); } catch { return; }
+    if (supervised) counters.observe(m);
     if (m.type === "result") {
       finalText = m.result || null;
       if (supervised) providerResult = { subtype: m.subtype, is_error: m.is_error, num_turns: m.num_turns, duration_ms: m.duration_ms, duration_api_ms: m.duration_api_ms, usage: m.usage, model_usage: m.modelUsage, estimated_list_price_usd: m.total_cost_usd, estimate_is_actual_subscription_charge: false };
@@ -293,7 +299,11 @@ export async function start(argv) {
   const ended = !violation && !finalized ? await closeOnServer(ctl, "/api/run/end", endCategory) : null;
   const session = (() => { try { return JSON.parse(readFileSync(join(ctl, "session.json"), "utf8")).session; } catch { return null; } })();
   const keep = join(stateDir(), "reports"), stamp = Date.now();
-  if (supervised && providerResult) { mkdirSync(keep, { recursive: true, mode: 0o700 }); writeFileSync(join(keep, `${stamp}-provider.json`), JSON.stringify(providerResult, null, 2), { mode: 0o600 }); }
+  if (supervised) {
+    mkdirSync(keep, { recursive: true, mode: 0o700 });
+    writeFileSync(join(keep, `${stamp}-metrics.json`), JSON.stringify({ ...counters.snapshot(), tool_calls_admitted: admittedToolCalls(ctl), max_tool_calls: SUPERVISED_TOOL_CALLS, native_max_tool_use_turns: 16, cli_num_turns: providerResult?.num_turns ?? null }, null, 2), { mode: 0o600 });
+    if (providerResult) writeFileSync(join(keep, `${stamp}-provider.json`), JSON.stringify(providerResult, null, 2), { mode: 0o600 });
+  }
   if (ended) { mkdirSync(keep, { recursive: true, mode: 0o700 }); writeFileSync(join(keep, `${stamp}-ended.json`), JSON.stringify({ ended: endCategory, at: Date.now(), session, server_confirmed: !!ended.confirmed, detail: ended.why || null }, null, 2), { mode: 0o600 }); }
   if (existsSync(join(ctl, "report.json")) || violation) mkdirSync(keep, { recursive: true, mode: 0o700 });
   if (existsSync(join(ctl, "report.json"))) copyFileSync(join(ctl, "report.json"), join(keep, `${stamp}.json`));
