@@ -297,6 +297,14 @@ else {
     ok(wk.code === 0 && /Not swarm time/.test(wk.out), "outside the Sunday swarm the scheduled start checks with the server and starts nothing");
   }
 
+  // The launcher opens the person's page itself, once, as soon as the first join saves it; Terminal shows it without the key.
+  const openerDir = fixture(), openedLog = path.join(openerDir, "opened.txt"), opener = path.join(openerDir, "opener.sh");
+  writeFileSync(opener, `#!/bin/sh\necho "$1" >> "${openedLog}"\n`); chmodSync(opener, 0o755);
+  const opens = await scenario("opens page", [J, CHECK_IN, { name: "mcp__night-shift__narrate", input: { text: "working" } }, { sleep: 2500 }, { name: "mcp__night-shift__report", input: {} }], { env: { NIGHT_SHIFT_NO_OPEN: "0", NIGHT_SHIFT_OPENER: opener } });
+  const openedLines = existsSync(openedLog) ? readFileSync(openedLog, "utf8").trim().split("\n") : [];
+  ok(openedLines.length === 1 && openedLines[0] === opens.me?.page_url && /#key=ok_/.test(openedLines[0]), "on a first join the launcher opens the person's own page once, with their private link");
+  ok(/Watch your AI live: http\S+\/ai\/[a-z]+-[a-z]+-\d{3}\s/.test(opens.out) && !/#key=/.test(opens.out), "Terminal shows the page link without the private key");
+
   const quiet = await scenario("no report", [J, CHECK_IN]);
   const quietRep = localReport(quiet, "-ended.json");
   ok(quietRep?.server_confirmed === true && quiet.runs?.runs[0]?.status === "stopped" && quiet.runs.runs[0].stop_kind === "no_report" && /without its report/.test(quiet.out) && await accessClosed(quiet, quietRep), "an AI that stops without reporting has its run closed on the server, with a report saying so");

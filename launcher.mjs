@@ -190,6 +190,13 @@ export function teardown(dir, base, prefix, id) {
   return true;
 }
 
+// The launcher opens the person's page itself (it runs in their own Terminal session), once per run.
+export function openPage(url, env = process.env) {
+  if (env.NIGHT_SHIFT_NO_OPEN === "1" || !/^https?:\/\//.test(url || "")) return false;
+  const cmd = env.NIGHT_SHIFT_OPENER ? [env.NIGHT_SHIFT_OPENER, [url]] : process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  try { const p = spawn(cmd[0], cmd[1], { detached: true, stdio: "ignore" }); p.on("error", () => {}); p.unref(); return true; } catch { return false; }
+}
+
 // A closed Terminal can make writes fail; cleanup must go on regardless.
 function say(text) { try { process.stdout.write(text + "\n"); } catch {} }
 
@@ -256,6 +263,18 @@ export async function start(argv) {
     CLAUDE_CODE_DISABLE_FAST_MODE: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_ARTIFACT_AUTO_OPEN: "0",
   } : {}) });
+  // Open the person's page as soon as it is known: now if this computer joined before, or once the first join saves it.
+  let pageShown = false;
+  const showPage = () => {
+    const url = readMe()?.page_url;
+    if (pageShown || !url) return;
+    pageShown = true;
+    say("Watch your AI live: " + url.split("#")[0]);
+    if (!supervised) openPage(url);
+  };
+  showPage();
+  const pageWatch = setInterval(showPage, 1000); pageWatch.unref();
+  env.NIGHT_SHIFT_NO_OPEN = "1";
   const child = spawn(bin, claudeArgs(self, runDir, prompt, { supervised }), { cwd: runDir, env, stdio: ["ignore", "pipe", "inherit"] });
   let why = null, finalText = null, providerResult = null;
   const counters = streamCounters();
@@ -285,6 +304,7 @@ export async function start(argv) {
   const signals = ["SIGINT", "SIGTERM", "SIGHUP"].map(sig => { const f = () => stop("cancel"); process.on(sig, f); return [sig, f]; });
   const watch = setInterval(() => { if (existsSync(join(ctl, "violation.json"))) stop("violation"); }, 250);
   const code = await new Promise(r => { child.on("exit", c => r(c)); child.on("error", () => r(127)); });
+  clearInterval(pageWatch);
   for (const [sig, f] of signals) process.off(sig, f);
   await new Promise(r => setTimeout(r, 200));
   if (finalText && !existsSync(join(ctl, "violation.json"))) say("\n" + finalText);
