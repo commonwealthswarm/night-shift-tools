@@ -7,6 +7,10 @@ import { join } from "node:path";
 import { stateDir } from "./state.mjs";
 
 const MODE = process.argv[2];
+if (MODE === "recover-owner") {
+  try { const { recoverOwner } = await import("./owner-recovery.mjs"); process.exit(await recoverOwner(process.argv.slice(3))); }
+  catch (e) { console.error("Owner recovery: " + e.message); process.exit(1); }
+}
 if (MODE === "start" || MODE === "guard" || MODE === "schedule") {
   const launcher = await import("./launcher.mjs");
   if (MODE === "start") process.exit(await launcher.start(process.argv.slice(3)));

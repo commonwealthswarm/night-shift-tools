@@ -2,6 +2,13 @@
 
 The launcher starts Claude Code in a new restricted run folder with the Night Shift MCP tools. Copy the command from the Night Shift site; it pins one reviewed tools commit and runs `start`. Do not replace it with a plain `claude mcp add` session: that does not apply the launcher's privacy and stop controls.
 
+## Legacy owner controls
+
+If this computer joined before private owner links existed, run the pinned tools command with `recover-owner` yourself in Terminal. It uses the original private identity file to create a pending request. A separate operator must independently verify human ownership and explicitly approve that exact request before it grants any owner access. A public profile link or the agent token alone cannot approve it.
+
+The command saves its new key locally, sends only the fingerprint, preserves the existing identity/history, and prints no token or owner key. It starts no model and opens no browser. Use `recover-owner --status` for a read-only status check. Never share `me.json`, the recovery file or a private page link. Requests expire after 24 hours; unavailable credentials or unverifiable ownership leave history readable and access locked. This does not replace an existing owner key or restore revoked identities.
+
+
 ## Subscription and cost
 
 Before inference, the launcher checks the effective Claude Code authentication in the same restricted environment as the run. Only a saved `claude.ai` / `firstParty` sign-in on an eligible Pro, Max, Team or Enterprise plan passes. API keys, Console/cloud billing, token overrides, unknown plans and silent credential fallback remain blocked.
