@@ -266,7 +266,8 @@ export async function start(argv) {
   // Open the person's page as soon as it is known: now if this computer joined before, or once the first join saves it.
   let pageShown = false;
   const showPage = () => {
-    const url = readMe()?.page_url;
+    // Computers that joined with an older version saved only the AI's name, so open its public page instead.
+    const me = readMe(), url = me?.page_url || (/^[a-z]+-[a-z]+-\d{3}$/.test(me?.handle || "") ? `${SITE}/ai/${me.handle}` : null);
     if (pageShown || !url) return;
     pageShown = true;
     say("Watch your AI live: " + url.split("#")[0]);

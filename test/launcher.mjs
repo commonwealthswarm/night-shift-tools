@@ -195,6 +195,7 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
 async function scenario(name, plan, opts = {}) {
   const F = fixture(), home = path.join(F, "home"), tmp = path.join(F, "tmp"), cfg = path.join(home, ".claude");
   mkdirSync(cfg, { recursive: true }); mkdirSync(tmp); mkdirSync(path.join(home, "Documents"));
+  if (opts.me) { mkdirSync(path.join(home, ".nightshift"), { recursive: true }); writeFileSync(path.join(home, ".nightshift", "me.json"), JSON.stringify(opts.me)); }
   writeFileSync(path.join(home, "Documents", "secret.txt"), "CANARY-PERSONAL-FILE");
   writeFileSync(path.join(cfg, "CLAUDE.md"), "CANARY-USER-MEMORY");
   writeFileSync(path.join(cfg, "settings.json"), JSON.stringify({ permissions: { allow: ["Bash", "Read", "WebFetch"] }, apiKeyHelper: `touch ${F}/APIKEYHELPER-RAN; echo CANARY-HELPER-KEY`, hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `touch ${F}/USER-HOOK-RAN` }] }] } }));
@@ -304,6 +305,14 @@ else {
   const openedLines = existsSync(openedLog) ? readFileSync(openedLog, "utf8").trim().split("\n") : [];
   ok(openedLines.length === 1 && openedLines[0] === opens.me?.page_url && /#key=ok_/.test(openedLines[0]), "on a first join the launcher opens the person's own page once, with their private link");
   ok(/Watch your AI live: http\S+\/ai\/[a-z]+-[a-z]+-\d{3}\s/.test(opens.out) && !/#key=/.test(opens.out), "Terminal shows the page link without the private key");
+
+  // A computer that joined with an older version saved no page link: the launcher opens the AI's public page.
+  const legacyJoin = await (await fetch(SITE + "/api/join", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mission: "indus-script", hours: 1 }) })).json();
+  const legacyLog = path.join(openerDir, "opened-legacy.txt"), legacyOpener = path.join(openerDir, "opener-legacy.sh");
+  writeFileSync(legacyOpener, `#!/bin/sh\necho "$1" >> "${legacyLog}"\n`); chmodSync(legacyOpener, 0o755);
+  const legacy = await scenario("legacy me.json", [CHECK_IN, { name: "mcp__night-shift__report", input: {} }], { me: { token: legacyJoin.token, handle: legacyJoin.handle, agent_id: legacyJoin.agent_id, mission: "indus-script", hours: 1 }, env: { NIGHT_SHIFT_NO_OPEN: "0", NIGHT_SHIFT_OPENER: legacyOpener } });
+  const legacyLines = existsSync(legacyLog) ? readFileSync(legacyLog, "utf8").trim().split("\n") : [];
+  ok(legacyLines.length === 1 && legacyLines[0] === `${SITE}/ai/${legacyJoin.handle}` && legacy.out.includes("Watch your AI live: " + SITE + "/ai/" + legacyJoin.handle), "a computer that joined with an older version (no saved page link) still gets its AI's page opened");
 
   const quiet = await scenario("no report", [J, CHECK_IN]);
   const quietRep = localReport(quiet, "-ended.json");
