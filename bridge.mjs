@@ -7,9 +7,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const MODE = process.argv[2];
-if (MODE === "start" || MODE === "guard") {
+if (MODE === "start" || MODE === "guard" || MODE === "schedule") {
   const launcher = await import("./launcher.mjs");
   if (MODE === "start") process.exit(await launcher.start(process.argv.slice(3)));
+  if (MODE === "schedule") process.exit(await launcher.schedule(process.argv.slice(3)));
   await launcher.guard();
 }
 

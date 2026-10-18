@@ -7,7 +7,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlin
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { judge, scanTranscript, teardown, identity, runEnv, testMode, preflight, RUN_PREFIX, trip, stopMessage } from "../launcher.mjs";
+import { judge, scanTranscript, teardown, identity, runEnv, testMode, preflight, RUN_PREFIX, trip, stopMessage, scheduleSpec, plistFor, cronFor } from "../launcher.mjs";
+import { claudeVersion, managedSettings, includedUsageOnly, codexState } from "../providers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bridge = path.join(here, "..", "bridge.mjs");
@@ -75,7 +76,7 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   const F = fixture(), started = path.join(F, "SESSION-STARTED");
   // The launcher passes the fake no extra variables, so its answer comes from a file named by its own path.
   // It also records its arguments, to show the status check runs under the run's own restricted policy.
-  const fakeFor = (auth, exit = 0) => { const f = path.join(F, "claude-" + Math.random().toString(36).slice(2)); writeFileSync(f + ".json", auth); writeFileSync(f, `#!/bin/sh\necho "$@" > "${f}.args"\ncase " $* " in *" auth status "*) cat "${f}.json"; exit ${exit};; esac\ntouch "${started}"\n`); chmodSync(f, 0o755); return f; };
+  const fakeFor = (auth, exit = 0) => { const f = path.join(F, "claude-" + Math.random().toString(36).slice(2)); writeFileSync(f + ".json", auth); writeFileSync(f, `#!/bin/sh\necho "$@" > "${f}.args"\ncase " $* " in *" --version "*) echo "2.1.299 (Claude Code)"; exit 0;; *" auth status "*) cat "${f}.json"; exit ${exit};; esac\ntouch "${started}"\n`); chmodSync(f, 0o755); return f; };
   const check = (auth, exit) => preflight(fakeFor(auth, exit), { PATH: process.env.PATH }, F);
   const sub = plan => JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", ...(plan === undefined ? {} : { subscriptionType: plan }) });
   const passing = await Promise.all(["pro", "max", "team", "enterprise", "Max"].map(p => check(sub(p))));
@@ -102,6 +103,58 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   let out = ""; run.stdout.on("data", d => out += d);
   const code = await new Promise(r => run.on("exit", r));
   ok(code === 4 && /never falls back to paid API use/.test(out) && !existsSync(started) && readdirSync(tmp).length === 0, "on API-key sign-in the launcher stops before starting a session or creating any folder");
+}
+
+// Design 5: each provider check, against fakes. Nothing here signs in or runs a model.
+{
+  const F = fixture(), started = path.join(F, "SESSION-STARTED");
+  const fake = (name, script) => { const f = path.join(F, name); writeFileSync(f, "#!/bin/sh\n" + script + "\n"); chmodSync(f, 0o755); return f; };
+  const env = { PATH: process.env.PATH };
+  ok((await claudeVersion(fake("c1", 'echo "2.1.299 (Claude Code)"'), env, F)).ok, "the tested Claude Code version passes");
+  const v = await claudeVersion(fake("c2", 'echo "2.2.0 (Claude Code)"'), env, F);
+  ok(!v.ok && v.why === "version" && /hasn't been tested/.test(v.say), "an untested Claude Code version is refused");
+  ok((await claudeVersion(path.join(F, "nope"), env, F)).why === "missing", "a missing Claude Code is reported");
+  const managedFile = path.join(F, "managed-settings.json"); writeFileSync(managedFile, "{}");
+  ok(!managedSettings([managedFile]).ok && managedSettings([path.join(F, "absent.json")]).ok, "organization-managed settings stop the run; none present passes");
+  const inc = includedUsageOnly({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" });
+  ok(!inc.ok && inc.why === "extra_usage_unverified" && /Nothing was charged/.test(inc.say), "without proof that paid extra usage is off, the run doesn't start");
+  const cx = await codexState(fake("codex", 'case "$1" in --version) echo "codex-cli 0.163.0";; login) echo "Logged in using ChatGPT";; *) touch "' + started + '";; esac'), env, F);
+  ok(!cx.ok && cx.why === "codex_unsupported" && cx.auth === "chatgpt" && cx.version === "0.163.0" && /personal Codex instructions/.test(cx.say), "Codex signed in with ChatGPT is still refused, with the reasons");
+
+  const tmp = path.join(F, "tmp"); mkdirSync(tmp);
+  const launch = (args, extra) => new Promise(r => { const p = spawn(process.execPath, [bridge, ...args], { env: { PATH: process.env.PATH, HOME: path.join(F, "home"), NIGHT_SHIFT_TMP: tmp, ...extra }, stdio: ["ignore", "pipe", "pipe"] }); let out = ""; p.stdout.on("data", d => out += d); p.on("exit", code => r({ code, out })); });
+  const c = await launch(["start", "--ai", "codex"], { NIGHT_SHIFT_CODEX: path.join(F, "codex") });
+  ok(c.code === 5 && /doesn't run on Codex yet/.test(c.out) && !existsSync(started) && readdirSync(tmp).length === 0, "start --ai codex stops before any session or folder");
+  const goodClaude = fake("claude-ok", 'case " $* " in *" --version "*) echo "2.1.299 (Claude Code)";; *" auth status "*) echo \'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}\';; *) touch "' + started + '";; esac');
+  const p = await launch(["start"], { NIGHT_SHIFT_CLAUDE: goodClaude });
+  ok(p.code === 4 && /included usage/.test(p.out) && !existsSync(started) && readdirSync(tmp).length === 0, "Claude Code on a Max plan still stops at the included-usage check, before any session or folder");
+  const w = await launch(["start", "--weekly"], { NIGHT_SHIFT_CLAUDE: goodClaude });
+  ok(w.code === 0 && /not starting/.test(w.out) && !existsSync(started), "a weekly start with no Join weekly on record does nothing and runs no checks or model");
+  const sc = await launch(["schedule", "--ai", "codex", "--tool", "https://codeload.github.com/commonwealthswarm/night-shift-tools/tar.gz/" + "a".repeat(40)], {});
+  ok(sc.code === 5 && !existsSync(path.join(F, "home", ".nightshift", "schedule")), "no weekly schedule is written for Codex");
+}
+
+// The weekly schedule works under a scheduler's bare environment. Nothing is installed and no model runs.
+{
+  const F = fixture();
+  const tool = "https://codeload.github.com/commonwealthswarm/night-shift-tools/tar.gz/" + "c".repeat(40);
+  const plan = scheduleSpec(tool, process.env);
+  ok(plan.ok && plan.argv[0].endsWith("/npx") && path.isAbsolute(plan.argv[0]) && path.isAbsolute(plan.env.NIGHT_SHIFT_CLAUDE) && plan.argv.slice(-2).join(" ") === "start --weekly", "the schedule names npx and Claude Code by full path");
+  const bare = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: path.join(F, "home") };
+  const runIn = (argv, env) => new Promise(r => { const p = spawn(argv[0], argv.slice(1), { env, stdio: ["ignore", "pipe", "pipe"] }); let out = ""; p.stdout.on("data", d => out += d); p.stderr.on("data", d => out += d); p.on("exit", code => r({ code, out })); p.on("error", e => r({ code: 127, out: String(e) })); });
+  const old = await runIn(["/usr/bin/env", "npx", "--version"], bare);
+  const npx = await runIn([plan.argv[0], "--version"], { ...bare, ...plan.env });
+  const cl = await runIn([plan.env.NIGHT_SHIFT_CLAUDE, "--version"], { ...bare, ...plan.env });
+  const ready = await runIn([process.execPath, bridge, "start", "--weekly"], { ...bare, ...plan.env });
+  ok(npx.code === 0 && cl.code === 0 && /\d+\.\d+\.\d+/.test(cl.out) && ready.code === 0 && /not starting/.test(ready.out), "under launchd's bare PATH, the schedule's own PATH finds npx, node and Claude Code (version only), and the weekly start checks in and stops" + (old.code ? "" : " (note: npx happened to be on the bare PATH)"));
+  const odd = { ok: true, argv: ["/Apps/My Tools & <Node>/npx", "-y", tool, "start", "--weekly"], env: { PATH: "/a b/c&d:/usr/bin", NIGHT_SHIFT_CLAUDE: "/x/it's \"claude\"" } };
+  const plist = path.join(F, "t.plist"); writeFileSync(plist, plistFor(odd, path.join(F, "log & out.txt")));
+  let parsed = null;
+  try { parsed = JSON.parse(execFileSync("plutil", ["-convert", "json", "-o", "-", plist]).toString()); } catch {}
+  ok(!parsed || (parsed.ProgramArguments[0] === odd.argv[0] && parsed.EnvironmentVariables.NIGHT_SHIFT_CLAUDE === odd.env.NIGHT_SHIFT_CLAUDE && parsed.EnvironmentVariables.PATH === odd.env.PATH && parsed.StandardOutPath.endsWith("log & out.txt")), "paths with spaces, &, <, > and quotes survive the plist's XML" + (parsed ? "" : " (plutil not available, skipped)"));
+  const cronLine = cronFor(odd, "/l o g");
+  const parts = execFileSync("/bin/sh", ["-c", "printf '%s\\n' " + cronLine.replace(/^\*\/5 \* \* \* \* env /, "").replace(/ >> .*$/s, "")]).toString().trim().split("\n");
+  ok(parts.includes("NIGHT_SHIFT_CLAUDE=" + odd.env.NIGHT_SHIFT_CLAUDE) && parts.includes(odd.argv[0]), "the crontab line quotes the same paths for the shell");
 }
 
 // The guard fails closed, and a tripped run refuses even allowed tools.
@@ -219,6 +272,25 @@ else {
     ok(c.code === 130 && /cancelled/.test(c.out) && c.tmpLeft.length === 0 && !wroteAfter(c) && c.secs < 20, `${sig} cancels the run and cleans up`);
     const rep = localReport(c, "-ended.json");
     ok(rep?.server_confirmed === true && /server confirmed/.test(c.out) && c.runs?.runs[0]?.status === "stopped" && c.runs.runs[0].stop_kind === "cancelled" && await accessClosed(c, rep), `${sig}: the server closes the run, the report says cancelled, and later research calls are refused`);
+  }
+
+  const limited = await scenario("usage limit", [J, CHECK_IN, { usage_limit: true }, WRITE]);
+  const limitedRep = localReport(limited, "-ended.json");
+  ok(limitedRep?.ended === "usage_limit" && limitedRep.server_confirmed === true && /usage limit/.test(limited.out) && limited.runs?.runs[0]?.stop_kind === "usage_limit" && !wroteAfter(limited) && await accessClosed(limited, limitedRep), "at the plan's usage limit the run ends and closes on the server, with no retry or other credential");
+
+  // Claude Code path end to end: setup, report, explicit weekly choice, then a schedule written but not installed.
+  const key = clean.me.page_url.split("#key=")[1];
+  const choice = await (await fetch(`${SITE}/api/owner/${clean.me.handle}/choice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, choice: "weekly" }) })).json();
+  const tool = "https://codeload.github.com/commonwealthswarm/night-shift-tools/tar.gz/" + "b".repeat(40);
+  const home = path.join(clean.F, "home");
+  const sched = await new Promise(r => { const p = spawn(process.execPath, [bridge, "schedule", "--tool", tool], { env: { PATH: process.env.PATH, HOME: home, NIGHT_SHIFT_SITE: SITE }, stdio: ["ignore", "pipe", "pipe"] }); let out = ""; p.stdout.on("data", d => out += d); p.on("exit", code => r({ code, out })); });
+  const file = path.join(home, ".nightshift", "schedule", process.platform === "darwin" ? "com.nightshift.weekly.plist" : "crontab.txt");
+  const body = existsSync(file) ? readFileSync(file, "utf8") : "";
+  ok(choice.ok && sched.code === 0 && body.includes(tool) && body.includes("--weekly") && /NOT installed/.test(sched.out) && !existsSync(path.join(home, "Library", "LaunchAgents")), "after Join weekly, the schedule is written for the person to install, and nothing is installed");
+  const live = (await (await fetch(SITE + "/api/shift")).json()).swarm.live;
+  if (!live) {
+    const wk = await new Promise(r => { const p = spawn(process.execPath, [bridge, "start", "--weekly"], { env: { PATH: process.env.PATH, HOME: home, NIGHT_SHIFT_SITE: SITE, NIGHT_SHIFT_CLAUDE: "/nonexistent" }, stdio: ["ignore", "pipe", "pipe"] }); let out = ""; p.stdout.on("data", d => out += d); p.on("exit", code => r({ code, out })); });
+    ok(wk.code === 0 && /Not swarm time/.test(wk.out), "outside the Sunday swarm the scheduled start checks with the server and starts nothing");
   }
 
   const quiet = await scenario("no report", [J, CHECK_IN]);

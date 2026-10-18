@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir, homedir } from "node:os";
 import { join, resolve, sep, isAbsolute, dirname, basename } from "node:path";
 import { createInterface } from "node:readline";
+import { claudeVersion, managedSettings, includedUsageOnly, codexState, USAGE_LIMIT } from "./providers.mjs";
 import { fileURLToPath } from "node:url";
 
 export const RUNTIME = "claude-restricted/1";
@@ -52,7 +53,7 @@ export async function preflight(bin, env, cwd, settings = "{}") {
   if (out.code === 127) return { ok: false, why: "missing", say: "Claude Code wasn't found. Install it from claude.com/code, sign in with your Claude subscription, then run this line again." };
   let st; try { st = JSON.parse(out.buf); } catch { return { ok: false, why: "unreadable", say: "Night Shift couldn't read Claude Code's sign-in status, so it didn't start." }; }
   if (!st.loggedIn || st.authMethod === "none") return { ok: false, why: "signed_out", say: "Claude Code isn't signed in. Run claude, sign in with your Claude subscription, then run this line again." };
-  if (!SUBSCRIPTION_METHODS.has(st.authMethod) || st.apiProvider !== "firstParty") return { ok: false, why: "not_subscription", method: st.authMethod || null, provider: st.apiProvider || null, say: `Claude Code on this computer would use ${st.authMethod === "api_key" || st.authMethod === "api_key_helper" ? "an API key, which is billed per use" : st.authMethod === "third_party" || st.apiProvider !== "firstParty" ? "a cloud provider account" : "a sign-in Night Shift can't confirm is a subscription"}. Night Shift runs only on a Claude subscription and never falls back to paid API use, so it didn't start. To use your subscription, sign in to Claude Code with your claude.ai account (in Claude Code, /login) and run this line again.` };
+  if (!SUBSCRIPTION_METHODS.has(st.authMethod) || st.apiProvider !== "firstParty") return { ok: false, why: "not_subscription", method: st.authMethod || null, provider: st.apiProvider || null, say: `Claude Code on this computer would use ${st.authMethod === "api_key" || st.authMethod === "api_key_helper" ? "an API key, which is billed per use" : st.authMethod === "third_party" || st.apiProvider !== "firstParty" ? "a cloud provider account" : "a sign-in Night Shift can't confirm is a subscription"}. Night Shift runs only on a Claude subscription and never falls back to paid API use, so it didn't start. To use your subscription, sign in yourself with claude auth login --claudeai and run this line again.` };
   const plan = String(st.subscriptionType || "").toLowerCase();
   if (!ELIGIBLE_PLANS.has(plan)) return { ok: false, why: "plan", plan: plan || null, say: `Night Shift couldn't confirm a Claude Pro, Max, Team or Enterprise plan on this sign-in${plan ? ` (it reports "${plan}")` : ""}, so it didn't start. It never falls back to paid API use.` };
   return { ok: true, plan };
@@ -155,7 +156,7 @@ export async function closeOnServer(ctl, route, category) {
 }
 
 export function endMessage(why, ended) {
-  const what = why === "time" ? "The run reached its time limit and was ended." : why === "cancel" ? "The run was cancelled." : "The run ended without its report.";
+  const what = why === "time" ? "The run reached its time limit and was ended." : why === "cancel" ? "The run was cancelled." : why === "usage_limit" ? "The run stopped at your plan's usage limit. Night Shift doesn't retry or switch to paid use." : "The run ended without its report.";
   if (ended.confirmed) return `Night Shift: ${what} The server confirmed the run's access is closed.`;
   if (ended.why === "no_run") return `Night Shift: ${what} It hadn't started on the server, so no access had been given.`;
   return `Night Shift: ${what} Its server couldn't confirm that the run's access is closed; it closes by itself at the run's time limit. The details are saved in ~/.nightshift/reports.`;
@@ -184,21 +185,48 @@ export function teardown(dir, base, prefix, id) {
 // A closed Terminal can make writes fail; cleanup must go on regardless.
 function say(text) { try { process.stdout.write(text + "\n"); } catch {} }
 
+const readMe = () => { try { return JSON.parse(readFileSync(join(homedir(), ".nightshift", "me.json"), "utf8")); } catch { return null; } };
+
+// Asks the server whether a weekly run may start now: Join weekly chosen, the swarm live, not already run this week.
+export async function weeklyReady(me) {
+  if (!me?.token) return { ready: false, reason: "This computer hasn't joined Night Shift yet." };
+  try {
+    const r = await fetch(SITE + "/api/weekly/ready", { headers: { authorization: "Bearer " + me.token }, signal: AbortSignal.timeout(15_000) });
+    const j = await r.json();
+    return r.ok && j.ok ? j : { ready: false, reason: j.error || "The server didn't answer." };
+  } catch { return { ready: false, reason: "The Night Shift server couldn't be reached." }; }
+}
+
+export async function checks(ai, bin, env, settings) {
+  if (ai === "codex") return codexState(bin, env, tmpdir());
+  for (const step of [() => claudeVersion(bin, env, tmpdir()), () => managedSettings(), () => preflight(bin, env, tmpdir(), settings)]) {
+    const r = await step();
+    if (!r.ok) return r;
+  }
+  return includedUsageOnly();
+}
+
 export async function start(argv) {
   const self = fileURLToPath(new URL("./bridge.mjs", import.meta.url));
-  const mode = testMode(process.env), bin = process.env.NIGHT_SHIFT_CLAUDE || "claude";
+  const ai = argv.includes("--ai") ? argv[argv.indexOf("--ai") + 1] : "claude";
+  if (!["claude", "codex"].includes(ai)) { say(`Night Shift: "${ai}" isn't a supported AI. Use claude or codex.`); return 2; }
+  const mode = testMode(process.env), bin = ai === "codex" ? process.env.NIGHT_SHIFT_CODEX || "codex" : process.env.NIGHT_SHIFT_CLAUDE || "claude";
+  if (argv.includes("--weekly")) {
+    const w = await weeklyReady(readMe());
+    if (!w.ready) { say("Night Shift weekly run: not starting. " + (w.reason || "")); return 0; }
+  }
   if (mode === "invalid") { say("Night Shift: test mode needs a fake key and a model address on 127.0.0.1. Nothing was started."); return 4; }
-  if (mode === "local") say("Night Shift TEST MODE: a fake model on this computer, not a real run.");
+  if (mode === "local" && ai === "claude") say("Night Shift TEST MODE: a fake model on this computer, not a real run.");
   else {
-    const check = await preflight(bin, runEnv(process.env, {}), tmpdir(), runSettings(self));
-    if (!check.ok) { say("Night Shift: " + check.say); return 4; }
+    const check = await checks(ai, bin, runEnv(process.env, {}), runSettings(self));
+    if (!check.ok) { say("Night Shift: " + check.say); return ai === "codex" ? 5 : 4; }
   }
   const base = realpathSync(process.env.NIGHT_SHIFT_TMP || tmpdir());
   const runDir = mkdtempSync(join(base, RUN_PREFIX)), ctl = mkdtempSync(join(base, CTL_PREFIX));
   const runId = identity(runDir), ctlId = identity(ctl);
   let cleaned = false;
   try {
-  const me = (() => { try { return JSON.parse(readFileSync(join(homedir(), ".nightshift", "me.json"), "utf8")); } catch { return null; } })();
+  const me = readMe();
   const workMin = me ? (me.hours || 2) * 60 : 15;
   const limitMs = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000 || (workMin + 5) * 60_000;
   const weekly = argv.includes("--weekly");
@@ -214,7 +242,7 @@ export async function start(argv) {
   // The stream shows every tool use the model asks for, so a disabled or unknown tool ends the run even though no hook runs for it.
   createInterface({ input: child.stdout }).on("line", async line => {
     let m; try { m = JSON.parse(line); } catch { return; }
-    if (m.type === "result") finalText = m.result || null;
+    if (m.type === "result") { finalText = m.result || null; if (m.is_error && USAGE_LIMIT.test(String(m.result || "") + " " + String(m.subtype || ""))) why ||= "usage_limit"; }
     if (m.type !== "assistant" || !Array.isArray(m.message?.content)) return;
     // Sessions aren't saved to disk, so this log is the guard's record of every tool use the model asked for.
     if (m.message.content.some(c => c.type === "tool_use")) writeFileSync(join(ctl, "attempts.jsonl"), JSON.stringify({ type: "assistant", message: { content: m.message.content.filter(c => c.type === "tool_use") } }) + "\n", { flag: "a", mode: 0o600 });
@@ -240,7 +268,7 @@ export async function start(argv) {
   // Any exit without a finalized report closes the run on the server too: cancel, time limit, an AI that stops
   // early or a crash. It is only claimed closed when the server confirms.
   const finalized = (() => { try { return JSON.parse(readFileSync(join(ctl, "report.json"), "utf8")).finalized === true; } catch { return false; } })();
-  const endCategory = why === "time" ? "time_limit" : why === "cancel" ? "cancelled" : "no_report";
+  const endCategory = why === "time" ? "time_limit" : why === "cancel" ? "cancelled" : why === "usage_limit" ? "usage_limit" : "no_report";
   const ended = !violation && !finalized ? await closeOnServer(ctl, "/api/run/end", endCategory) : null;
   const session = (() => { try { return JSON.parse(readFileSync(join(ctl, "session.json"), "utf8")).session; } catch { return null; } })();
   const keep = join(homedir(), ".nightshift", "reports"), stamp = Date.now();
@@ -258,4 +286,65 @@ export async function start(argv) {
   } finally {
     if (!cleaned) { teardown(runDir, base, RUN_PREFIX, runId); teardown(ctl, base, CTL_PREFIX, ctlId); }
   }
+}
+
+// A scheduler starts with almost no environment (launchd's PATH is /usr/bin:/bin:/usr/sbin:/sbin), so the schedule
+// names the node, npx and Claude Code found now, by full path, and sets its own PATH from their folders.
+export function scheduleSpec(tool, env, which = whichSync) {
+  const node = process.execPath, npx = join(dirname(node), "npx"), claude = which("claude", env.PATH || "");
+  if (!existsSync(npx)) return { ok: false, say: `npx wasn't found next to node (${node}), so no schedule was written.` };
+  if (!claude) return { ok: false, say: "Claude Code wasn't found on your PATH, so no schedule was written." };
+  const path = [...new Set([dirname(node), dirname(claude), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
+  return { ok: true, argv: [npx, "-y", tool, "start", "--weekly"], env: { PATH: path, NIGHT_SHIFT_CLAUDE: claude } };
+}
+export function whichSync(name, pathVar) {
+  for (const d of pathVar.split(":").filter(Boolean)) { const f = join(d, name); try { if (existsSync(f)) return realpathSync(f); } catch {} }
+  return null;
+}
+const xml = v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+export function plistFor(plan, logFile) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nightshift.weekly</string>
+  <key>ProgramArguments</key><array>${plan.argv.map(a => `<string>${xml(a)}</string>`).join("")}</array>
+  <key>EnvironmentVariables</key><dict>${Object.entries(plan.env).map(([k, v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`).join("")}</dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>${xml(logFile)}</string>
+  <key>StandardErrorPath</key><string>${xml(logFile)}</string>
+</dict>
+</plist>
+`;
+}
+const sh = v => "'" + String(v).replace(/'/g, "'\\''") + "'";
+export function cronFor(plan, logFile) {
+  return `*/5 * * * * env ${Object.entries(plan.env).map(([k, v]) => `${k}=${sh(v)}`).join(" ")} ${plan.argv.map(sh).join(" ")} >> ${sh(logFile)} 2>&1\n`;
+}
+
+// Writes a weekly schedule for the person to review and install themselves; Night Shift never installs it.
+// It checks every 5 minutes, and only the check inside the live Sunday swarm (one per week) starts a run.
+export async function schedule(argv) {
+  const tool = argv.includes("--tool") ? argv[argv.indexOf("--tool") + 1] : null;
+  const ai = argv.includes("--ai") ? argv[argv.indexOf("--ai") + 1] : "claude";
+  if (ai !== "claude") { say("Night Shift: weekly schedules are only for Claude Code. " + (ai === "codex" ? "Night Shift doesn't run on Codex yet." : "")); return 5; }
+  if (!tool || !/^https:\/\/codeload\.github\.com\/commonwealthswarm\/night-shift-tools\/tar\.gz\/[0-9a-f]{40}$/.test(tool)) { say("Night Shift: copy the schedule line from your page; it names the exact tools version."); return 2; }
+  const w = await weeklyReady(readMe());
+  if (w.choice !== "weekly") { say("Night Shift: your page doesn't show Join weekly, so no schedule was written."); return 3; }
+  const plan = scheduleSpec(tool, process.env);
+  if (!plan.ok) { say("Night Shift: " + plan.say); return 4; }
+  const dir = join(homedir(), ".nightshift", "schedule");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  let file, how;
+  if (process.platform === "darwin") {
+    file = join(dir, "com.nightshift.weekly.plist");
+    writeFileSync(file, plistFor(plan, join(dir, "weekly.log")), { mode: 0o600 });
+    how = `To install it yourself: cp "${file}" ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.nightshift.weekly.plist`;
+  } else {
+    file = join(dir, "crontab.txt");
+    writeFileSync(file, cronFor(plan, join(dir, "weekly.log")), { mode: 0o600 });
+    how = `To install it yourself, add the lines in ${file} with crontab -e`;
+  }
+  say(`Night Shift wrote a weekly schedule to ${file}. It is NOT installed: nothing will run until you install it. It checks every 5 minutes and starts one run only during the Sunday 8 PM Pacific swarm, ${w.next_swarm_local || "the same moment worldwide"}. ${how}`);
+  return 0;
 }

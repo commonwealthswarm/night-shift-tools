@@ -1,5 +1,5 @@
 // A stand-in for the model API, for tests only. It plays a fixed script of tool calls and logs every request.
-// Steps: {name, input} for one tool call, an array of them for parallel calls, or {sleep: ms}.
+// Steps: {name, input} for one tool call, an array of them for parallel calls, {sleep: ms}, or {usage_limit: true}.
 import http from "node:http";
 import { appendFileSync } from "node:fs";
 const [port, logFile, planJson] = process.argv.slice(2);
@@ -31,8 +31,11 @@ http.createServer((req, res) => {
     appendFileSync(logFile, JSON.stringify({ main, tools, raw: body, results }) + "\n");
     const reply = (blocks, stop) => b.stream ? sse(res, blocks, stop) : (res.writeHead(200, { "content-type": "application/json" }), res.end(JSON.stringify({ id: "msg_" + ++n, type: "message", role: "assistant", model: "mock", content: blocks, stop_reason: stop, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } })));
     if (!main) return reply([{ type: "text", text: "ok" }], "end_turn");
-    let p = plan[step++];
-    while (p && p.sleep) { await sleep(p.sleep); p = plan[step++]; }
+    let p = plan[step];
+    while (p && p.sleep) { await sleep(p.sleep); p = plan[++step]; }
+    // A plan's usage limit: every later request is refused the way a subscription limit is.
+    if (p && p.usage_limit) { res.writeHead(429, { "content-type": "application/json", "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600), "retry-after": "3600" }); return res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Usage limit reached for this plan." } })); }
+    step++;
     if (!p) return reply([{ type: "text", text: "done" }], "end_turn");
     const calls = (Array.isArray(p) ? p : [p]).map(c => ({ type: "tool_use", id: c.id || "toolu_" + ++ids, name: c.name, input: c.input || {} }));
     reply(calls, "tool_use");
