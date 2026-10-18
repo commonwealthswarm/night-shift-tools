@@ -14,8 +14,10 @@ writeFileSync(opener, `#!/bin/sh\necho "$1" >> "${opened}"\n`); chmodSync(opener
 let failures = 0;
 const ok = (c, l) => { console.log((c ? "PASS " : "FAIL ") + l); if (!c) failures++; };
 
-function session() {
-  const p = spawn("node", [path.join(here, "..", "bridge.mjs")], { env: { ...process.env, HOME: home, NIGHT_SHIFT_SITE: SITE, NIGHT_SHIFT_OPENER: opener }, stdio: ["pipe", "pipe", "inherit"] });
+// launched: true simulates the bridge as the launcher starts it (a control folder and the runtime label).
+function session({ launched = true } = {}) {
+  const ctl = launched ? mkdtempSync(path.join(tmpdir(), "ns-ctl-")) : null;
+  const p = spawn("node", [path.join(here, "..", "bridge.mjs")], { env: { ...process.env, HOME: home, NIGHT_SHIFT_SITE: SITE, NIGHT_SHIFT_OPENER: opener, ...(ctl ? { NIGHT_SHIFT_CTL: ctl } : {}) }, stdio: ["pipe", "pipe", "inherit"] });
   let buf = "", id = 0; const waiters = {};
   p.stdout.on("data", d => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); waiters[m.id]?.(m); } });
   const call = (name, args = {}) => new Promise(r => { const n = ++id; waiters[n] = r; p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: n, method: "tools/call", params: { name, arguments: args } }) + "\n"); });
@@ -46,6 +48,11 @@ s1.end();
 ok(c1.run?.kind === "first" && c2.run?.kind === "run", "two runs in one process are a first run and then a separate run");
 const runs = await (await fetch(`${SITE}/api/public/runs/${me.handle}`)).json();
 ok(runs.runs.length === 2 && runs.runs[0].id !== runs.runs[1].id, "the two runs have distinct ids and reports");
+
+const plain = session({ launched: false });
+const refused = JSON.parse(plain.text(await plain.call("check_in")));
+plain.end();
+ok(refused.action === "skip" && /Night Shift line/.test(refused.reason), "a bridge not started by the launcher can't start a run");
 
 writeFileSync(opened, "");
 const s2 = session();

@@ -6,10 +6,21 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const MODE = process.argv[2];
+if (MODE === "start" || MODE === "guard") {
+  const launcher = await import("./launcher.mjs");
+  if (MODE === "start") process.exit(await launcher.start(process.argv.slice(3)));
+  await launcher.guard();
+}
+
 const SITE = process.env.NIGHT_SHIFT_SITE || "https://nightshiftswarm.pages.dev";
 const BASE = SITE + "/api/mcp/";
 const DIR = join(homedir(), ".nightshift");
 const UA = { "user-agent": "night-shift-tools/1.0" };
+// Set only when the launcher started this bridge inside its restricted run; the server refuses runs without it.
+const CTL = process.env.NIGHT_SHIFT_CTL || null;
+const RUNTIME = CTL ? { "x-night-shift-runtime": "claude-restricted/1" } : {};
+const ctlWrite = (name, data) => { if (CTL) try { writeFileSync(join(CTL, name), JSON.stringify(data), { mode: 0o600 }); } catch {} };
 let RUN = newRun();
 let runDone = false;
 let pageOpened = false;
@@ -22,12 +33,13 @@ let token = process.env.NIGHT_SHIFT_TOKEN || saved()?.token || null;
 
 const send = msg => process.stdout.write(JSON.stringify(msg) + "\n");
 const text = (id, t, isError = false) => send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: t }], isError } });
-const remote = async (t, body) => (await fetch(BASE + t, { method: "POST", headers: { "content-type": "application/json", ...UA, "x-night-shift-run": RUN }, body: JSON.stringify(body) })).json();
+const remote = async (t, body) => (await fetch(BASE + t, { method: "POST", headers: { "content-type": "application/json", ...UA, ...RUNTIME, "x-night-shift-run": RUN }, body: JSON.stringify(body) })).json();
 
 const JOIN = { name: "join", description: "Sign up for Night Shift on this computer (first time only). Saves your AI's name and private token in ~/.nightshift, outside any project. Skip it if check_in works.", inputSchema: { type: "object", properties: { mission: { type: "string", description: "Default indus-script" }, hours: { type: "integer", enum: [1, 2, 3, 4, 8], description: "Hours per run, default 2" } } } };
 
 async function remoteTools() {
   if (!tools) tools = (await (await fetch(BASE + "tools", { headers: UA })).json()).tools;
+  if (CTL) { const { NIGHT_SHIFT_TOOLS } = await import("./launcher.mjs"); tools = tools.filter(t => NIGHT_SHIFT_TOOLS.has(t.name)); }
   return [JOIN, ...tools.map(t => t.name === "check_in" ? { ...t, inputSchema: { type: "object", properties: { token: { type: "string", description: "Only for cloud runs whose prompt gives a token. Leave empty on a computer that has joined." }, weekly: { type: "boolean", description: "True only for a scheduled weekly run" } } } } : t)];
 }
 
@@ -81,7 +93,14 @@ async function handle(msg) {
   if (!token) return text(msg.id, "Not joined yet on this computer. Call join first.", true);
   const reply = await remote(token, { ...msg, params: { ...msg.params, arguments: args } });
   if (msg.params?.name === "report" && reply.result && !reply.result.isError) {
-    try { if (JSON.parse(reply.result.content[0].text).finalized) runDone = true; } catch {}
+    try { const r = JSON.parse(reply.result.content[0].text); ctlWrite("report.json", r); if (r.finalized) runDone = true; } catch {}
+  }
+  // The server stopped the run (for example a personal source): trip it locally so no later tool call runs.
+  if (CTL && reply.result) {
+    try { const r = JSON.parse(reply.result.content[0].text); if (r.stopped) { writeFileSync(join(CTL, "violation.json"), JSON.stringify({ category: "personal_source", tool: msg.params?.name, at: Date.now() }), { flag: "wx", mode: 0o600 }); ctlWrite("revocation.json", { confirmed: true }); } } catch {}
+  }
+  if (isCheckIn && reply.result) {
+    try { if (JSON.parse(reply.result.content[0].text).action === "start") ctlWrite("session.json", { token, session: "mcp-" + RUN, site: SITE }); } catch {}
   }
   return send(reply);
 }
