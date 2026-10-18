@@ -1,10 +1,11 @@
-// Why Codex stays unavailable, checked against the installed Codex CLI. It runs Codex with every isolation option it
-// has, a fixture CODEX_HOME holding stand-in personal instructions and a skill, and test/mock-responses.mjs as the
-// model on loopback with a fake key. No ChatGPT sign-in, real model or real Codex folder is used.
-// PASS means the leak is still there, so Night Shift must keep refusing Codex. A FAIL means Codex changed and its
-// support should be reassessed, not switched on.
+// Checks Codex's own isolation options against the installed Codex CLI: a fixture CODEX_HOME holding stand-in
+// personal instructions and a skill, and test/mock-responses.mjs as the model on loopback with a fake key. No ChatGPT
+// sign-in, real model or real Codex folder is used.
+// PASS means that with these options alone the stand-ins still reach the model. That doesn't cover every possible
+// option: the experimental file restriction in experimental/codex-context.mjs (test/codex-context.mjs) does keep them
+// out in the same kind of test. Codex stays unavailable either way until a full runner is accepted.
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ if (!version) { console.log("SKIP Codex isn't installed"); process.exit(0); }
 console.log("INFO " + version);
 
 const F = realpathSync(mkdtempSync(path.join(tmpdir(), "ns-codex-")));
+process.on("exit", () => { try { if (path.basename(F).startsWith("ns-codex-")) rmSync(F, { recursive: true, force: true }); } catch {} });
 const home = path.join(F, "codexhome"), work = path.join(F, "work");
 mkdirSync(path.join(home, "skills", "canary-skill"), { recursive: true }); mkdirSync(work); mkdirSync(path.join(F, "personal"));
 writeFileSync(path.join(home, "AGENTS.md"), "CANARY-CODEX-AGENTS-MD\n");
@@ -35,7 +37,7 @@ const code = await new Promise(r => { const p = spawn("codex", args, { cwd: work
 mock.kill();
 const sent = existsSync(log) ? readFileSync(log, "utf8") : "";
 ok(code === 0 && sent.includes("/responses"), "Codex ran against the loopback fake model");
-ok(sent.includes("CANARY-CODEX-AGENTS-MD") || sent.includes("CANARY-CODEX-SKILL"), "Codex still sends the person's own Codex instructions or skills to the model, so Night Shift keeps Codex unavailable");
+ok(sent.includes("CANARY-CODEX-AGENTS-MD") || sent.includes("CANARY-CODEX-SKILL"), "with Codex's own options, the stand-in personal instructions or skills still reach the model");
 const added = readdirSync(home).filter(n => !before.has(n));
 console.log("INFO project AGENTS.md sent: " + sent.includes("CANARY-PROJECT-AGENTS") + "; new files in CODEX_HOME despite --ephemeral: " + (added.join(", ") || "none"));
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");

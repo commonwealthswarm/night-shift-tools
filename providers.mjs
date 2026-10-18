@@ -37,20 +37,22 @@ export function managedSettings(paths = MANAGED_PATHS[process.platform] || []) {
   return found.length ? { ok: false, why: "managed", found, say: "This computer has organization-managed Claude Code settings, which apply even inside Night Shift's limits and could change them. Night Shift didn't start." } : { ok: true };
 }
 
-// Night Shift must be able to show that a run stays inside the plan's included usage. Claude Code's sign-in status
-// says which plan is in use but not whether paid extra usage is switched on, so this can't be shown yet.
+// Night Shift must be able to show that a run stays inside the plan's included usage. Anthropic documents an
+// account setting for this (Settings > Usage > Usage credits: Off), but it is set by the person on their account and
+// Claude Code reports nothing about it to a script, so the launcher can't check it. --max-budget-usd is an estimate
+// that can overshoot and turning off auto-reload still allows existing credits, so neither stands in for it.
 export function includedUsageOnly(status) {
-  return { ok: false, why: "extra_usage_unverified", say: "Night Shift can't yet confirm from this computer that a run would stay within your plan's included usage (paid extra usage may be switched on for your account), so it didn't start. Nothing was charged." };
+  return { ok: false, why: "extra_usage_unverified", say: "Night Shift can't confirm from this computer that a run would stay within your plan's included usage. Your Claude account has a setting for that (Settings > Usage > Usage credits: Off), but Claude Code doesn't report it, so Night Shift can't check it and doesn't start, even if you have turned it off. Nothing was charged." };
 }
 
-// In the tested configuration (Codex 0.163.0 with the isolation options in test/codex-probe.mjs), Codex still sent
-// the person's own Codex instructions
-// ($CODEX_HOME/AGENTS.md) and skills to the model, and wrote state into $CODEX_HOME. Keeping those out would
-// mean changing the person's Codex setup, so Codex runs don't start. Paid ChatGPT credits after the included
-// limits also can't be ruled out.
+// With Codex 0.163.0's own options (test/codex-probe.mjs), Codex still sent the person's own global instructions and
+// skills to the model and wrote state into $CODEX_HOME. An experimental macOS file restriction
+// (experimental/codex-context.mjs, test/codex-context.mjs) kept them out in a test with stand-in files, but it isn't a
+// runner: real sign-in, network limits, stopping a run and billing aren't covered. ChatGPT plans can also draw on
+// paid credits after the included limits, and Codex offers no per-run setting found so far to prevent that.
 export const CODEX_BLOCKERS = [
-  "In the configuration Night Shift tested (Codex 0.163.0 with every isolation option it tried), Codex still sent your personal Codex instructions (AGENTS.md in your Codex folder) and your skills to the model, and Night Shift can't keep them out without changing your Codex setup.",
-  "Night Shift can't yet confirm that a Codex run would stay within your ChatGPT plan's included usage rather than paid credits.",
+  "With Codex 0.163.0's own options, Codex still sent your personal Codex instructions and skills to the model. An experimental file restriction kept them out in a test with stand-in files, but it hasn't been accepted as a full, safe way to run Codex yet.",
+  "Your ChatGPT plan can use paid credits after its included limits, and Night Shift hasn't found a way to stop a Codex run from doing that.",
 ];
 export async function codexState(bin, env, cwd) {
   const v = await run(bin, ["--version"], env, cwd);
