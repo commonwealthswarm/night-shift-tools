@@ -2,8 +2,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
-// Claude Code versions whose restricted mode, hooks and stream were tested with Night Shift's boundary.
-export const TESTED_CLAUDE_VERSIONS = new Set(["2.1.299"]);
+// The oldest Claude Code with every flag the launcher relies on (restricted mode, --tools, --strict-mcp-config,
+// --permission-prompts). Newer versions run: whatever they add, the PreToolUse guard and the stream scan still
+// end the run on any tool outside the allowed list.
+export const MIN_CLAUDE_VERSION = "2.1.299";
+const atLeast = (v, min) => { const a = v.split(".").map(Number), b = min.split(".").map(Number); for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]; return true; };
 
 // Managed (organization) settings load even in restricted mode and could add hooks, MCP servers or a credential.
 // These are the documented file and profile locations; server-managed settings have no documented local marker.
@@ -28,7 +31,7 @@ export async function claudeVersion(bin, env, cwd) {
   const r = await run(bin, ["--version"], env, cwd);
   const v = (r.out.match(/(\d+\.\d+\.\d+)/) || [])[1] || null;
   if (r.code === 127) return { ok: false, why: "missing", say: "Claude Code wasn't found. Install it from claude.com/code, sign in with your Claude subscription, then run this line again." };
-  if (!v || !TESTED_CLAUDE_VERSIONS.has(v)) return { ok: false, why: "version", version: v, say: `Claude Code ${v || "(unknown version)"} hasn't been tested with Night Shift's privacy limits yet (tested: ${[...TESTED_CLAUDE_VERSIONS].join(", ")}), so it didn't start.` };
+  if (!v || !atLeast(v, MIN_CLAUDE_VERSION)) return { ok: false, why: "version", version: v, say: `Claude Code ${v || "(unknown version)"} is older than ${MIN_CLAUDE_VERSION}, which Night Shift's privacy limits need. Update it (claude update), then run this line again.` };
   return { ok: true, version: v };
 }
 

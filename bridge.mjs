@@ -11,10 +11,11 @@ if (MODE === "recover-owner") {
   try { const { recoverOwner } = await import("./owner-recovery.mjs"); process.exit(await recoverOwner(process.argv.slice(3))); }
   catch (e) { console.error("Owner recovery: " + e.message); process.exit(1); }
 }
-if (MODE === "start" || MODE === "guard" || MODE === "schedule") {
+if (MODE === "start" || MODE === "guard" || MODE === "schedule" || MODE === "unschedule") {
   const launcher = await import("./launcher.mjs");
   if (MODE === "start") process.exit(await launcher.start(process.argv.slice(3)));
   if (MODE === "schedule") process.exit(await launcher.schedule(process.argv.slice(3)));
+  if (MODE === "unschedule") process.exit(await launcher.unschedule());
   await launcher.guard();
 }
 
