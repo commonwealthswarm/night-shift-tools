@@ -1,4 +1,7 @@
-# Night Shift tools
+# Night Shift tools (archived)
+
+**This repository is archived.** The tools now live in the Night Shift application repository (`tools/night-shift-tools/` in MikeGIT777/nightshift, branch `try-a-shift`), and the site serves them from nightshiftswarm.pages.dev. Make changes there. Older copied lines and weekly schedules that point at a commit here keep working.
+
 
 The launcher starts Claude Code in a new restricted run folder with the Night Shift MCP tools. Copy the command from the Night Shift site; it pins one reviewed tools commit and runs `start`. Do not replace it with a plain `claude mcp add` session: that does not apply the launcher's privacy and stop controls.
 
