@@ -225,6 +225,8 @@ export async function checks(ai, bin, env, settings) {
   return { ok: true, say: SUBSCRIPTION_USAGE_NOTICE };
 }
 
+export const MINUTES = [2, 15, 30, 60, 120];
+
 export async function start(argv) {
   const self = fileURLToPath(new URL("./bridge.mjs", import.meta.url));
   const supervised = argv.includes("--supervised");
@@ -253,14 +255,17 @@ export async function start(argv) {
   try {
   if (supervised) { const budget = join(ctl, "tool-budget"); mkdirSync(budget, { mode: 0o700 }); writeFileSync(join(budget, "limit.json"), JSON.stringify({ max_tool_calls: SUPERVISED_TOOL_CALLS }), { mode: 0o600 }); }
   const me = readMe();
-  const workMin = me ? (me.hours || 2) * 60 : 15;
+  // --minutes sets this run's length; older copied lines with --hours, and weekly runs, keep the saved hours.
+  const mins = Number(argv[argv.indexOf("--minutes") + 1]);
+  const minutes = argv.includes("--minutes") && MINUTES.includes(mins) ? mins : null;
+  const workMin = minutes || (me ? (me.hours || 2) * 60 : 15), graceMin = Math.min(5, Math.ceil(workMin / 3));
   const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
-  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + 5) * 60_000;
+  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + graceMin) * 60_000;
   const weekly = argv.includes("--weekly");
   const h = Number(argv[argv.indexOf("--hours") + 1]);
-  const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
-  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
-  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  const hours = minutes ? Math.max(1, Math.ceil(minutes / 60)) : argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
+  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (minutes && !supervised ? ` This run lasts ${minutes} minutes: plan for that, then call report before the time is up.` : "") + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
+  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${minutes ? `Up to ${minutes < 60 ? minutes + " minutes" : minutes / 60 + " hour" + (minutes === 60 ? "" : "s")} of work` : me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to ${graceMin} minute${graceMin === 1 ? "" : "s"} to finish its report; it is ended after that.`}`);
   const env = runEnv(process.env, { NIGHT_SHIFT_CTL: ctl, NIGHT_SHIFT_RUN_DIR: runDir, ...(supervised ? {
     NIGHT_SHIFT_SINGLE_RUN: "1", NIGHT_SHIFT_NO_OPEN: "1", CLAUDE_CODE_MAX_RETRIES: "0",
     CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "2048",
