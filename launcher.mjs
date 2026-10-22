@@ -253,6 +253,8 @@ async function saveChoice(s, choice, scheduled) {
   } catch { return { ok: false, error: "the server couldn't be reached" }; }
 }
 
+export const MINUTES = [2, 15, 30, 60, 120];
+
 export async function start(argv) {
   const self = fileURLToPath(new URL("./bridge.mjs", import.meta.url));
   const supervised = argv.includes("--supervised");
@@ -332,19 +334,22 @@ async function shift({ argv, self, supervised, ai, mode, bin, weeklyRun, tui }) 
   }
   if (quitAsked) { say("Night Shift: closed before the run started. Nothing was started."); return 130; }
   const me = readMe();
-  const workMin = me ? (me.hours || 2) * 60 : 15;
+  // --minutes sets this shift's length; older copied lines with --hours, and weekly runs, keep the saved hours.
+  const mins = Number(argv[argv.indexOf("--minutes") + 1]);
+  const minutes = argv.includes("--minutes") && MINUTES.includes(mins) ? mins : null;
+  const workMin = minutes || (me ? (me.hours || 2) * 60 : 15), graceMin = Math.min(5, Math.ceil(workMin / 3));
   const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
-  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + 5) * 60_000;
+  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + graceMin) * 60_000;
   const deadline = Date.now() + limitMs;
   const h = Number(argv[argv.indexOf("--hours") + 1]);
-  const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
-  const firstPrompt = (weeklyRun ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
+  const hours = minutes ? Math.max(1, Math.ceil(minutes / 60)) : argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
+  const firstPrompt = (weeklyRun ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (minutes && !supervised ? ` This shift lasts ${minutes} minutes: plan for that, then call report before the time is up.` : "") + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
   // Later passes are ordinary runs: a weekly check-in is accepted once per swarm.
   const nextPrompt = "Continue my Night Shift shift: new work may be waiting. Call check_in, then next_task.";
-  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${minutes ? `Up to ${minutes < 60 ? minutes + " minutes" : minutes / 60 + " hour" + (minutes === 60 ? "" : "s")} of work` : me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to ${graceMin} minute${graceMin === 1 ? "" : "s"} to finish its report; it is ended after that.`}`);
   step("tools", "tools", "night-shift · files · shell ✗ web ✗", "ok");
   step("identity", "identity", me?.handle || "new · joins at check-in", "ok");
-  tui?.set({ limitMs: me ? workMin * 60_000 : 15 * 60_000 });
+  tui?.set({ limitMs: minutes || me ? workMin * 60_000 : 15 * 60_000 });
 
   // How many AIs are online, for the window's swarm pane. Public and read-only.
   const pollSwarm = async () => { try { const r = await (await fetch(SITE + "/api/stats", { signal: AbortSignal.timeout(10_000) })).json(); if (r.ok) tui.swarm({ online: r.online }); } catch {} };
