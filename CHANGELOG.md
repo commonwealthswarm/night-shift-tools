@@ -1,5 +1,15 @@
 # Night Shift changelog
 
+## Night Shift window and weekly schedule — local, unpublished
+
+- On a real Terminal, `start` shows the Night Shift window (`tui.mjs`): the launcher's checks as a boot log, then a live log of every tool call in plain words with a one-line reason, the sign being studied, and an end summary. The page is no longer opened automatically; `o` opens it. `--plain` or `NIGHT_SHIFT_PLAIN=1` keeps the old output. Supervised tests never use the window.
+- With the window up, a shift lasts its hours instead of ending when the queue runs dry. When the AI reports with nothing left to claim, the launcher waits without the model: it checks `/api/status` and the public project trees about once a minute and starts a new session (a new run on the server) when the task list changes. It ends at the hours limit, when the server says the hours are used, or on `q`. Plain and supervised runs are still one session.
+- After the first finished task, the window asks once whether to join the weekly swarm. Yes installs, on this computer only (`weekly.mjs`): a pinned copy of these tools in `~/.nightshift/tools`, a launchd agent that runs `start --weekly` at Sunday 8 PM Pacific on this computer's clock (plus retries at 5, 20 and 60 minutes), and, approved in macOS's own administrator dialog, one-off wake events owned by `nightshift` for the next 12 Sundays. The person's own repeating wake and other programs' wakes are never touched. Declining the dialog keeps the schedule for when the Mac is awake. On Linux it adds a crontab entry with no wake.
+- The answer is sent to the server with the run's own session once the report is in, and the schedule is confirmed there. `unschedule` removes the agent, the wakes and the pinned copy.
+- A scheduled start opens a Terminal window so the person can watch; without one it runs as before. One run at a time per computer (`~/.nightshift/run.lock`). `caffeinate` holds off idle sleep while a run is going.
+- Claude Code is no longer pinned to one tested version: 2.1.299 or newer runs. The PreToolUse guard and the stream scan still end a run on any tool outside the allowed list, so a built-in a new version adds (2.1.306 offers DeferredToolPlaceholder) can be offered but not used.
+- Privacy boundary, restricted tools, subscription checks, stop controls and cleanup are unchanged. Tests: `test/weekly.mjs` (no system changes: every command is logged instead) and `test/tui-weekly.mjs` (real Claude Code, fake model, local API).
+
 ## Request policy — 2026-10-18
 
 The launcher now opens the live agent page only after the server confirms the run has started, including very short runs. Joining alone opens no idle monitoring page. It still opens the page once, keeps the private owner fragment out of Terminal output, and makes no network request from its local page watcher. See the application repository’s `docs/REQUEST_POLICY.md` for the complete UI/API request policy and Peter’s section guide.

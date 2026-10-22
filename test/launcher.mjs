@@ -113,9 +113,10 @@ const fixture = () => realpathSync(mkdtempSync(path.join(tmpdir(), "ns-priv-")))
   const F = fixture(), started = path.join(F, "SESSION-STARTED");
   const fake = (name, script) => { const f = path.join(F, name); writeFileSync(f, "#!/bin/sh\n" + script + "\n"); chmodSync(f, 0o755); return f; };
   const env = { PATH: process.env.PATH };
-  ok((await claudeVersion(fake("c1", 'echo "2.1.299 (Claude Code)"'), env, F)).ok, "the tested Claude Code version passes");
-  const v = await claudeVersion(fake("c2", 'echo "2.2.0 (Claude Code)"'), env, F);
-  ok(!v.ok && v.why === "version" && /hasn't been tested/.test(v.say), "an untested Claude Code version is refused");
+  ok((await claudeVersion(fake("c1", 'echo "2.1.299 (Claude Code)"'), env, F)).ok && (await claudeVersion(fake("c3", 'echo "2.1.306 (Claude Code)"'), env, F)).ok && (await claudeVersion(fake("c4", 'echo "3.0.0 (Claude Code)"'), env, F)).ok, "the minimum Claude Code version and anything newer pass");
+  const v = await claudeVersion(fake("c2", 'echo "2.1.298 (Claude Code)"'), env, F);
+  ok(!v.ok && v.why === "version" && /older than/.test(v.say), "a Claude Code older than the minimum is refused");
+  ok((await claudeVersion(fake("c5", 'echo "nightly"'), env, F)).why === "version", "an unreadable version is refused");
   ok((await claudeVersion(path.join(F, "nope"), env, F)).why === "missing", "a missing Claude Code is reported");
   const managedFile = path.join(F, "managed-settings.json"); writeFileSync(managedFile, "{}");
   ok(!managedSettings([managedFile]).ok && managedSettings([path.join(F, "absent.json")]).ok, "organization-managed settings stop the run; none present passes");
@@ -247,7 +248,10 @@ else {
   const toolNames = new Set(clean.main.flatMap(l => l.tools));
   ok(clean.code === 0 && clean.runs?.runs[0]?.status === "completed", "a clean run checks in, writes in its folder, reports and completes");
   ok(wroteAfter(clean), "control: the write check does see an allowed write when one happens");
-  ok([...toolNames].every(t => ["Read", "Write", "Edit", "Glob", "Grep"].includes(t) || t.startsWith("mcp__night-shift__")) && toolNames.has("Write") && !toolNames.has("Bash"), "the AI is offered only the five file tools and the Night Shift tools");
+  // Newer Claude Code versions may offer extra built-ins (2.1.306 adds DeferredToolPlaceholder). Offering isn't the
+  // boundary; calling is: every offered tool outside the allowed list must be one the guard refuses.
+  const extra = [...toolNames].filter(t => !["Read", "Write", "Edit", "Glob", "Grep"].includes(t) && !t.startsWith("mcp__night-shift__"));
+  ok(toolNames.has("Write") && !["Bash", "WebFetch", "WebSearch", "Agent"].some(t => toolNames.has(t)) && extra.every(t => judge({ tool_name: t, tool_input: {} }, clean.F) === "tool_not_allowed"), "the AI gets the five file tools and the Night Shift tools; no shell or web, and anything else offered is refused if called" + (extra.length ? ` (also offered: ${extra.join(", ")})` : ""));
   ok(!/CANARY-(USER-MEMORY|ENV-KEY|HELPER-KEY|PERSONAL-FILE)/.test(clean.all), "no personal memory, environment key, helper key or file reaches the model");
   ok(["USER-HOOK-RAN", "USER-MCP-RAN", "APIKEYHELPER-RAN", "NODE-OPTIONS-RAN"].every(f => !existsSync(path.join(clean.F, f))), "the person's own hooks, MCP servers, key helper and NODE_OPTIONS don't run");
   ok(clean.tmpLeft.length === 0 && clean.reports.length === 1, "teardown deletes the run and control folders and keeps the report");

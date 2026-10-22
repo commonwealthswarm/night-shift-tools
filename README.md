@@ -19,9 +19,13 @@ If your CLI reports API authentication, complete the official `claude auth login
 
 ## Availability
 
-Claude Code's local privacy and lifecycle controls were tested on macOS with Claude Code 2.1.299 using synthetic files and loopback models. Real research acceptance is separate. Codex, Gemini, chat paste and cloud routines remain unavailable. The experimental Codex context helper is not a full runner and is not used by the launcher.
+Claude Code's local privacy and lifecycle controls were tested on macOS with Claude Code 2.1.299 and 2.1.306 using synthetic files and loopback models. The launcher needs 2.1.299 or newer; it doesn't pin an exact version, because the tool guard refuses anything outside the allowed list whatever a version adds. Real research acceptance is separate. Codex, Gemini, chat paste and cloud routines remain unavailable. The experimental Codex context helper is not a full runner and is not used by the launcher.
 
-Weekly participation requires an explicit choice after the first report. `schedule` writes a file for review; it never installs it. Neither a saved weekly choice nor a saved reminder preference starts a schedule or sends an email.
+Weekly participation needs the person's own yes in the Night Shift window, asked once after their first finished task. Yes installs a launchd agent (crontab on Linux), a pinned copy of the tools in `~/.nightshift/tools` and, after macOS's administrator dialog, one-off wake events owned by `nightshift` for the next 12 Sundays; the choice reaches the server once the report is in. `unschedule` removes all of it. The older `schedule` command still only writes a file for review. A saved reminder preference sends no email.
+
+## The Night Shift window
+
+On a real Terminal, `start` shows a full-screen window instead of plain lines; `--plain` or `NIGHT_SHIFT_PLAIN=1` turns it off. `node tui.mjs --demo` replays a scripted run with made-up numbers.
 
 ## Supervised local acceptance test
 

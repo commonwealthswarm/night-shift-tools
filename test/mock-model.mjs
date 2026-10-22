@@ -1,5 +1,6 @@
 // A stand-in for the model API, for tests only. It plays a fixed script of tool calls and logs every request.
-// Steps: {name, input} for one tool call, an array of them for parallel calls, {sleep: ms}, or {usage_limit: true}.
+// Steps: {name, input} for one tool call, an array of them for parallel calls, {sleep: ms}, {usage_limit: true}, or
+// {end: true} to end the turn with text, so the session finishes and the next request starts a new one.
 import http from "node:http";
 import { appendFileSync } from "node:fs";
 const [port, logFile, planJson] = process.argv.slice(2);
@@ -46,7 +47,7 @@ http.createServer((req, res) => {
     // A plan's usage limit: every later request is refused the way a subscription limit is.
     if (p && p.usage_limit) { res.writeHead(429, { "content-type": "application/json", "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 3600), "retry-after": "3600" }); return res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Usage limit reached for this plan." } })); }
     step++;
-    if (!p) return reply([{ type: "text", text: "done" }], "end_turn");
+    if (!p || p.end) return reply([{ type: "text", text: "done" }], "end_turn");
     // "$PROJECT" and "$TASK" in an input stand for the task the latest next_task result handed out.
     const held = heldTask(b.messages || []);
     const fill = v => typeof v === "string" ? v.replaceAll("$PROJECT", held.project_id ?? "$PROJECT").replaceAll("$TASK", held.task_id ?? "$TASK") : v && typeof v === "object" ? (Array.isArray(v) ? v.map(fill) : Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x)]))) : v;

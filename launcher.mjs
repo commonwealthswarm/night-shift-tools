@@ -7,6 +7,8 @@ import { claudeVersion, managedSettings, SUBSCRIPTION_USAGE_NOTICE, codexState, 
 import { fileURLToPath } from "node:url";
 import { stateDir } from "./state.mjs";
 import { SUPERVISED_TOOL_CALLS, reserveToolCall, admittedToolCalls, streamCounters } from "./budget.mjs";
+import { createTui } from "./tui.mjs";
+import * as weekly from "./weekly.mjs";
 
 export const RUNTIME = "claude-restricted/1";
 export const RUN_PREFIX = "night-shift-run-";
@@ -201,8 +203,13 @@ export function openPage(url, env = process.env) {
   try { const p = spawn(cmd[0], cmd[1], { detached: true, stdio: "ignore" }); p.on("error", () => {}); p.unref(); return true; } catch { return false; }
 }
 
-// A closed Terminal can make writes fail; cleanup must go on regardless.
-function say(text) { try { process.stdout.write(text + "\n"); } catch {} }
+// A closed Terminal can make writes fail; cleanup must go on regardless. While the Night Shift window is up,
+// messages wait in `held` and print as a plain transcript once it closes.
+let held = null;
+function say(text) { if (held) return void held.push(text); try { process.stdout.write(text + "\n"); } catch {} }
+
+// The Night Shift window, on a real Terminal, unless plain output is asked for or this is a supervised test.
+const wantsTui = (argv, supervised) => !supervised && !argv.includes("--plain") && process.env.NIGHT_SHIFT_PLAIN !== "1" && !!process.stdout.isTTY && !!process.stdin.isTTY;
 
 const readMe = () => { try { return JSON.parse(readFileSync(join(stateDir(), "me.json"), "utf8")); } catch { return null; } };
 
@@ -216,13 +223,34 @@ export async function weeklyReady(me) {
   } catch { return { ready: false, reason: "The Night Shift server couldn't be reached." }; }
 }
 
-export async function checks(ai, bin, env, settings) {
+// step(id, key, value, state) reports each check as it runs, for the Night Shift window.
+export async function checks(ai, bin, env, settings, step = () => {}) {
   if (ai === "codex") return codexState(bin, env, tmpdir());
-  for (const step of [() => claudeVersion(bin, env, tmpdir()), () => managedSettings(), () => preflight(bin, env, tmpdir(), settings)]) {
-    const r = await step();
-    if (!r.ok) return r;
-  }
+  step("claude", "claude", "looking for claude code");
+  const v = await claudeVersion(bin, env, tmpdir());
+  step("claude", "claude", v.ok ? v.version : v.version ? `${v.version} · too old` : "not found", v.ok ? "ok" : "fail");
+  if (!v.ok) return v;
+  step("policy", "policy", "reading managed settings");
+  const m = managedSettings();
+  step("policy", "policy", m.ok ? "no managed settings" : "organization settings found", m.ok ? "ok" : "fail");
+  if (!m.ok) return m;
+  step("auth", "auth", "checking sign-in");
+  const a = await preflight(bin, env, tmpdir(), settings);
+  step("auth", "auth", a.ok ? `claude ${a.plan} · subscription` : "not a claude subscription", a.ok ? "ok" : "fail");
+  if (!a.ok) return a;
   return { ok: true, say: SUBSCRIPTION_USAGE_NOTICE };
+}
+
+// The person's weekly answer, sent with the run's own session once its report is in (the server takes it then).
+async function saveChoice(s, choice, scheduled) {
+  if (!s?.token || !s.session) return { ok: false, error: "the run never started on the server" };
+  const headers = { "content-type": "application/json", authorization: "Bearer " + s.token, "x-night-shift-session": s.session };
+  try {
+    const r = await (await fetch((s.site || SITE) + "/api/choice", { method: "POST", headers, body: JSON.stringify({ choice }), signal: AbortSignal.timeout(10_000) })).json();
+    if (!r.ok) return { ok: false, error: r.error || "refused" };
+    if (scheduled) await fetch((s.site || SITE) + "/api/choice/scheduled", { method: "POST", headers, signal: AbortSignal.timeout(10_000) }).catch(() => {});
+    return { ok: true };
+  } catch { return { ok: false, error: "the server couldn't be reached" }; }
 }
 
 export async function start(argv) {
@@ -235,32 +263,158 @@ export async function start(argv) {
   const ai = argv.includes("--ai") ? argv[argv.indexOf("--ai") + 1] : "claude";
   if (!["claude", "codex"].includes(ai)) { say(`Night Shift: "${ai}" isn't a supported AI. Use claude or codex.`); return 2; }
   const mode = testMode(process.env), bin = ai === "codex" ? process.env.NIGHT_SHIFT_CODEX || "codex" : process.env.NIGHT_SHIFT_CLAUDE || "claude";
-  if (argv.includes("--weekly")) {
+  const weeklyRun = argv.includes("--weekly");
+  if (weeklyRun) {
     const w = await weeklyReady(readMe());
     if (!w.ready) { say("Night Shift weekly run: not starting. " + (w.reason || "")); return 0; }
+    // A scheduled start has no window of its own: it opens Terminal, which runs this again so the person can watch.
+    if (weekly.lockHeld()) { say("Night Shift weekly run: another Night Shift run is already going on this computer."); return 0; }
+    if (!process.stdout.isTTY && !process.env.NIGHT_SHIFT_FROM_SCHEDULE && await weekly.openWatchWindow()) { say("Night Shift weekly run: opened in a Terminal window."); return 0; }
   }
   if (mode === "invalid") { say("Night Shift: test mode needs a fake key and a model address on 127.0.0.1. Nothing was started."); return 4; }
-  if (mode === "local" && ai === "claude") say("Night Shift TEST MODE: a fake model on this computer, not a real run.");
+  const unlock = weekly.lock();
+  if (!unlock) { say("Night Shift: another Night Shift run is already going on this computer."); return 0; }
+  // Keeps the computer awake while this launcher runs (plugged in, it also holds off system sleep).
+  if (process.platform === "darwin" && !supervised && !process.env.NIGHT_SHIFT_FAKE_SYSTEM) try { const c = spawn("caffeinate", ["-i", "-s", "-w", String(process.pid)], { detached: true, stdio: "ignore" }); c.on("error", () => {}); c.unref(); } catch {}
+  const me0 = readMe();
+  const tui = wantsTui(argv, supervised) ? createTui({ keepGoing: true, weeklyRun, handle: me0?.handle, pageUrl: me0?.page_url, hours: me0?.hours, wakesLeft: weeklyRun ? (await weekly.status()).wakes : null }) : null;
+  if (tui) { held = []; tui.begin(); }
+  try { return await shift({ argv, self, supervised, ai, mode, bin, weeklyRun, tui }); }
+  finally {
+    if (tui) { tui.end(); const h = held; held = null; for (const l of h) say(l); }
+    unlock();
+  }
+}
+
+async function shift({ argv, self, supervised, ai, mode, bin, weeklyRun, tui }) {
+  // Window events: q or Ctrl-C ends the run (with the usual cleanup); y/w installs the weekly schedule.
+  let quitAsked = false, quitNow, stop = () => {}, installing = null, stopAsked = false, stopShift, lastSession = null;
+  const quitP = new Promise(r => quitNow = r), stopShiftP = new Promise(r => stopShift = () => { stopAsked = true; r(); });
+  const step = tui ? tui.check : () => {};
+  // The server takes the weekly answer only with the session of a run whose report is in, so the answer waits on
+  // disk until one is, in this shift or a later one, and is cleared once the server has it.
+  const flushChoice = async () => {
+    const p = weekly.pendingChoice();
+    if (!p || !lastSession) return;
+    const r = await saveChoice(lastSession, p.choice, p.scheduled);
+    if (r.ok) weekly.pendingChoice(null);
+    const text = r.ok ? "✓ saved to your page" : "· not saved yet: " + r.error + " (tries again after the next report)";
+    if (tui) { tui.set({ choiceSaved: text }); tui.toast("weekly answer " + text.replace(/^[✓·] /, ""), C_TOAST); }
+    else say("Night Shift weekly answer: " + text.replace(/^[✓·] /, ""));
+  };
+  if (tui) tui.on(ev => {
+    if (ev === "quit") { quitAsked = true; stop("cancel"); stopShift(); quitNow(); }
+    if (ev === "cancel") { stop("cancel"); stopShift(); }
+    if (ev === "schedule") installing = (async () => {
+      tui.set({ sched: { state: "working", steps: [] } });
+      // The PATH entry, not its target: Claude Code's installer points it at a versioned binary that updates remove.
+      const claude = process.env.NIGHT_SHIFT_CLAUDE || whichSync("claude", process.env.PATH || "", false);
+      let r;
+      try { r = await weekly.install({ claude, step: tui.schedStep }); }
+      catch (e) { tui.schedStep("error", "schedule", String(e.message || e).slice(0, 80), "fail"); r = { ok: false }; }
+      tui.set({ sched: { ...tui.state.sched, state: r.ok ? (r.wakes ? "ok" : "partial") : "fail" } });
+      if (r.ok && !weeklyRun) { weekly.pendingChoice({ choice: "weekly", scheduled: true }); if (lastSession) await flushChoice(); else tui.set({ choiceSaved: "· saved to your page once the report is in" }); }
+    })();
+    if (ev === "later") { weekly.pendingChoice({ choice: "later", scheduled: false }); if (lastSession) flushChoice(); }
+  });
+  // Nobody may be watching (a scheduled run): the window closes by itself a while after the shift ends.
+  const closeSoon = () => Promise.race([quitP, new Promise(r => setTimeout(r, AUTO_CLOSE_MS).unref())]);
+
+  if (mode === "local" && ai === "claude") { say("Night Shift TEST MODE: a fake model on this computer, not a real run."); step("mode", "mode", "test · fake model on this computer", "ok"); }
   else {
-    const check = await checks(ai, bin, runEnv(process.env, {}), runSettings(self));
-    if (!check.ok) { say("Night Shift: " + check.say); return ai === "codex" ? 5 : 4; }
+    const check = await checks(ai, bin, runEnv(process.env, {}), runSettings(self), step);
+    if (!check.ok) {
+      say("Night Shift: " + check.say);
+      if (tui) { tui.set({ bootError: check.say }); await closeSoon(); }
+      return ai === "codex" ? 5 : 4;
+    }
     say(check.say);
   }
+  if (quitAsked) { say("Night Shift: closed before the run started. Nothing was started."); return 130; }
+  const me = readMe();
+  const workMin = me ? (me.hours || 2) * 60 : 15;
+  const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
+  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + 5) * 60_000;
+  const deadline = Date.now() + limitMs;
+  const h = Number(argv[argv.indexOf("--hours") + 1]);
+  const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
+  const firstPrompt = (weeklyRun ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
+  // Later passes are ordinary runs: a weekly check-in is accepted once per swarm.
+  const nextPrompt = "Continue my Night Shift shift: new work may be waiting. Call check_in, then next_task.";
+  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  step("tools", "tools", "night-shift · files · shell ✗ web ✗", "ok");
+  step("identity", "identity", me?.handle || "new · joins at check-in", "ok");
+  tui?.set({ limitMs: me ? workMin * 60_000 : 15 * 60_000 });
+
+  // How many AIs are online, for the window's swarm pane. Public and read-only.
+  const pollSwarm = async () => { try { const r = await (await fetch(SITE + "/api/stats", { signal: AbortSignal.timeout(10_000) })).json(); if (r.ok) tui.swarm({ online: r.online }); } catch {} };
+  const swarmWatch = tui ? setInterval(pollSwarm, 30_000) : null;
+  if (tui) { swarmWatch.unref(); pollSwarm(); }
+  // Ctrl-C, a closed Terminal or a kill still end the session and clean up.
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"].map(sig => { const f = () => { stop("cancel"); stopShift(); if (tui) { quitAsked = true; quitNow(); } }; process.on(sig, f); return [sig, f]; });
+
+  // With the window up, the shift outlasts any one session: when the AI runs out of work and reports, the launcher
+  // waits without the model and starts it again when the swarm's task list changes, until the hours are used.
+  const keepGoing = !!tui && !supervised;
+  let pass = 0, last = null, endReason = null;
+  try {
+    for (;;) {
+      pass++;
+      last = await runPass({ prompt: pass === 1 ? firstPrompt : nextPrompt, msLeft: deadline - Date.now(), pass });
+      if (last.finalized) { lastSession = last.sessionFile; await flushChoice(); }
+      if (!keepGoing || quitAsked || stopAsked || last.violation || last.why || last.code !== 0 || !last.finalized) break;
+      endReason = await waitForWork(deadline, last.fingerprint);
+      if (endReason !== "work") break;
+      tui.note("run", "new work in the swarm · starting your AI again", "pass " + (pass + 1), "the task list changed, so the AI checks in again; while it waited, no model was used");
+    }
+  } finally {
+    clearInterval(swarmWatch);
+    for (const [sig, f] of signals) process.off(sig, f);
+  }
+  const { violation, revocation, ended, why, code } = last;
+  if (me?.page_url || readMe()?.page_url) say("Your page: " + (readMe()?.page_url || me.page_url).split("#")[0]);
+  if (tui) {
+    const timeUp = endReason === "time" || why === "time", hoursUp = endReason === "hours";
+    tui.set({ ended: true, waiting: null, final: { ok: !violation }, cancelled: stopAsked || why === "cancel",
+      stopped: violation ? stopMessage(violation, revocation) : null,
+      endNote: violation ? null : hoursUp ? "Your hours for today are used up." : timeUp ? "The shift reached its time limit." : ended ? endMessage(why, ended).replace(/^Night Shift: /, "") : null });
+    if (tui.state.phase !== "done") tui.setPhase("done");
+    if (installing) await installing;
+    if (!quitAsked) await closeSoon();
+    if (installing) await installing;
+    const sch = tui.state.sched;
+    if (sch.state) say(`Weekly: ${sch.steps.map(s => `${s.key} ${s.state || "…"} (${s.value})`).join(", ")}.\nTo remove it: node ${join(weekly.paths().tools, "bridge.mjs")} unschedule`);
+  }
+  return violation ? 3 : why === "cancel" ? 130 : code ?? 1;
+
+  // Waits without the model: checks the hours left and the swarm's task list about once a minute.
+  async function waitForWork(deadline, before) {
+    const since = Date.now();
+    tui.note("run", "the swarm's queue is quiet · watching for new work", "no model use", "nothing to claim right now; the launcher checks the task list each minute and wakes your AI when it changes");
+    for (;;) {
+      const next = Math.min(deadline, Date.now() + WAIT_MS);
+      tui.set({ waiting: { since, next } });
+      await Promise.race([new Promise(r => setTimeout(r, next - Date.now())), stopShiftP]);
+      if (stopAsked || quitAsked) return "stop";
+      if (Date.now() >= deadline) return "time";
+      if ((await hoursState()) === "stop") return "hours";
+      const now = await taskFingerprint();
+      if (!now) continue;
+      if (!before) { before = now; continue; }
+      // Others claiming tasks isn't new work; a task opening up, or one accepted (which can unblock others), is.
+      if ([...now.open].some(id => !before.open.has(id)) || now.accepted > before.accepted) { tui.set({ waiting: null }); return "work"; }
+    }
+  }
+
+  // One Claude Code session in its own empty folder, with the guard, the stream scan and the server close.
+  async function runPass({ prompt, msLeft, pass }) {
   const base = realpathSync(process.env.NIGHT_SHIFT_TMP || tmpdir());
   const runDir = mkdtempSync(join(base, RUN_PREFIX)), ctl = mkdtempSync(join(base, CTL_PREFIX));
   const runId = identity(runDir), ctlId = identity(ctl);
   let cleaned = false;
   try {
   if (supervised) { const budget = join(ctl, "tool-budget"); mkdirSync(budget, { mode: 0o700 }); writeFileSync(join(budget, "limit.json"), JSON.stringify({ max_tool_calls: SUPERVISED_TOOL_CALLS }), { mode: 0o600 }); }
-  const me = readMe();
-  const workMin = me ? (me.hours || 2) * 60 : 15;
-  const requestedLimit = Number(process.env.NIGHT_SHIFT_LIMIT_SECONDS) * 1000;
-  const limitMs = supervised ? Math.min(requestedLimit > 0 ? requestedLimit : 120_000, 120_000) : requestedLimit || (workMin + 5) * 60_000;
-  const weekly = argv.includes("--weekly");
-  const h = Number(argv[argv.indexOf("--hours") + 1]);
-  const hours = argv.includes("--hours") && [1, 2, 3, 4, 8].includes(h) ? h : 2;
-  const prompt = (weekly ? "Start my weekly Night Shift run: call check_in with weekly true." : "Start my Night Shift run.") + ` If check_in says I haven't joined, call join with mission indus-script and hours ${hours} first.` + (supervised ? ` This is one supervised local test, limited to 16 tool-use cycles, ${SUPERVISED_TOOL_CALLS} tool calls and 120 seconds. Complete only the single small assigned task using the aggregate corpus queries requested by its spec. Narrate briefly, save the findings in a lab note and submission summary, then call report immediately and end. Do not claim another task, start a second run, request external sources, or record a weekly choice. No person is answering questions inside this CLI session.` : "");
-  say(`Night Shift: starting in a new empty folder. Your AI can use only the Night Shift tools and that folder. ${supervised ? `Supervised local test: at most ${limitMs / 1000} seconds, then up to 3 seconds for forced termination. The CLI limits tool-use cycles to 16; a separate guard admits at most ${SUPERVISED_TOOL_CALLS} tool calls. The CLI's reported num_turns counts differently. These are not a dollar cap.` : `${me ? `Up to ${workMin / 60} hour${workMin === 60 ? "" : "s"} of work` : "About 15 minutes of work for a first run"}, plus up to 5 minutes to finish its report; it is ended after that.`}`);
+  if (pass === 1) step("sandbox", "sandbox", "$TMPDIR/" + basename(runDir), "ok");
   const env = runEnv(process.env, { NIGHT_SHIFT_CTL: ctl, NIGHT_SHIFT_RUN_DIR: runDir, ...(supervised ? {
     NIGHT_SHIFT_SINGLE_RUN: "1", NIGHT_SHIFT_NO_OPEN: "1", CLAUDE_CODE_MAX_RETRIES: "0",
     CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "2048",
@@ -268,28 +422,38 @@ export async function start(argv) {
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_ARTIFACT_AUTO_OPEN: "0",
   } : {}) });
   // A confirmed check-in is the page's reason to watch. Opening before it exists would require idle discovery polling.
-  let pageShown = false;
+  // With the Night Shift window up, the page isn't opened: it's one key away.
+  let pageShown = pass > 1;
   const showPage = () => {
+    const me = readMe();
+    if (tui && me?.handle) tui.set({ handle: me.handle, pageUrl: me.page_url || `${SITE}/ai/${me.handle}` });
     if (!existsSync(join(ctl, "session.json"))) return;
     // Computers that joined with an older version saved only the AI's name, so open its public page instead.
-    const me = readMe(), url = me?.page_url || (/^[a-z]+-[a-z]+-\d{3}$/.test(me?.handle || "") ? `${SITE}/ai/${me.handle}` : null);
+    const url = me?.page_url || (/^[a-z]+-[a-z]+-\d{3}$/.test(me?.handle || "") ? `${SITE}/ai/${me.handle}` : null);
     if (pageShown || !url) return;
     pageShown = true;
+    if (tui) pollSwarm();
     say("Watch your AI live: " + url.split("#")[0]);
-    if (!supervised) openPage(url);
+    if (!supervised && !tui) openPage(url);
   };
   showPage();
   const pageWatch = setInterval(showPage, 1000); pageWatch.unref();
   env.NIGHT_SHIFT_NO_OPEN = "1";
-  const child = spawn(bin, claudeArgs(self, runDir, prompt, { supervised }), { cwd: runDir, env, stdio: ["ignore", "pipe", "inherit"] });
+  const child = spawn(bin, claudeArgs(self, runDir, prompt, { supervised }), { cwd: runDir, env, stdio: ["ignore", "pipe", tui ? "pipe" : "inherit"] });
+  let stderr = "";
+  child.stderr?.on("data", d => { stderr = (stderr + d).slice(-2000); });
+  if (pass === 1) step("spawn", "spawn", `claude --restricted · pid ${child.pid}`, "ok");
   let why = null, finalText = null, providerResult = null;
   const counters = streamCounters();
-  const stop = reason => { if (!why) { why = reason; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 3000).unref(); } };
+  let exited = false;
+  stop = reason => { if (!why && !exited) { why = reason; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 3000).unref(); } };
+  if (stopAsked) stop("cancel");
   const root = realpathSync(runDir);
   // The stream shows every tool use the model asks for, so a disabled or unknown tool ends the run even though no hook runs for it.
   createInterface({ input: child.stdout }).on("line", async line => {
     let m; try { m = JSON.parse(line); } catch { return; }
     if (supervised) counters.observe(m);
+    if (tui) try { tui.stream(m); } catch {}
     if (m.type === "result") {
       finalText = m.result || null;
       if (supervised) providerResult = { subtype: m.subtype, is_error: m.is_error, num_turns: m.num_turns, duration_ms: m.duration_ms, duration_api_ms: m.duration_api_ms, usage: m.usage, model_usage: m.modelUsage, estimated_list_price_usd: m.total_cost_usd, estimate_is_actual_subscription_charge: false };
@@ -302,18 +466,18 @@ export async function start(argv) {
       if (c.type !== "tool_use") continue;
       const v = judge({ tool_name: c.name, tool_input: c.input }, root);
       if (v) { stop("violation"); await trip(ctl, v, c.name); return; }
-      if (c.name === `mcp__${SERVER}__narrate` && c.input?.text) say("· " + String(c.input.text).slice(0, 140));
+      if (c.name === `mcp__${SERVER}__narrate` && c.input?.text && !tui) say("· " + String(c.input.text).slice(0, 140));
     }
   });
-  const timer = setTimeout(() => stop("time"), limitMs);
-  // Ctrl-C, a closed Terminal or a kill still end the session and clean up below.
-  const signals = ["SIGINT", "SIGTERM", "SIGHUP"].map(sig => { const f = () => stop("cancel"); process.on(sig, f); return [sig, f]; });
+  const timer = setTimeout(() => stop("time"), Math.max(0, msLeft));
   const watch = setInterval(() => { if (existsSync(join(ctl, "violation.json"))) stop("violation"); }, 250);
   const code = await new Promise(r => { child.on("exit", c => r(c)); child.on("error", () => r(127)); });
+  exited = true;
+  stop = () => {};
   showPage();
   clearInterval(pageWatch);
-  for (const [sig, f] of signals) process.off(sig, f);
   await new Promise(r => setTimeout(r, 200));
+  if (stderr.trim()) say(stderr.trim());
   if (finalText && !existsSync(join(ctl, "violation.json"))) say("\n" + finalText);
   clearTimeout(timer); clearInterval(watch);
   const violation = existsSync(join(ctl, "violation.json")) ? JSON.parse(readFileSync(join(ctl, "violation.json"), "utf8")) : null;
@@ -324,7 +488,8 @@ export async function start(argv) {
   const finalized = (() => { try { return JSON.parse(readFileSync(join(ctl, "report.json"), "utf8")).finalized === true; } catch { return false; } })();
   const endCategory = why === "time" ? "time_limit" : why === "cancel" ? "cancelled" : why === "usage_limit" ? "usage_limit" : "no_report";
   const ended = !violation && !finalized ? await closeOnServer(ctl, "/api/run/end", endCategory) : null;
-  const session = (() => { try { return JSON.parse(readFileSync(join(ctl, "session.json"), "utf8")).session; } catch { return null; } })();
+  const sessionFile = (() => { try { return JSON.parse(readFileSync(join(ctl, "session.json"), "utf8")); } catch { return null; } })();
+  const session = sessionFile?.session || null;
   const keep = join(stateDir(), "reports"), stamp = Date.now();
   if (supervised) {
     mkdirSync(keep, { recursive: true, mode: 0o700 });
@@ -340,11 +505,42 @@ export async function start(argv) {
   else if (ended) say("\n" + endMessage(why, ended));
   else if (code === 127) say("\nNight Shift: Claude Code wasn't found. Install it from claude.com/code, then run this line again.");
   say(cleaned ? "The run folder was deleted." : "The run folder was left in place: " + runDir);
-  if (me?.page_url) say("Your page: " + me.page_url.split("#")[0]);
-  return violation ? 3 : why === "cancel" ? 130 : code ?? 1;
+  // What the swarm's task list looked like when this pass ran out of work; a change means there may be work again.
+  const fingerprint = keepGoing && finalized && !violation && !why ? await taskFingerprint() : null;
+  return { code, why, violation, revocation, finalized, ended, sessionFile, fingerprint };
   } finally {
     if (!cleaned) { teardown(runDir, base, RUN_PREFIX, runId); teardown(ctl, base, CTL_PREFIX, ctlId); }
   }
+  }
+}
+
+const WAIT_MS = Number(process.env.NIGHT_SHIFT_WAIT_SECONDS || 60) * 1000;
+const C_TOAST = 0x7ee787;
+const AUTO_CLOSE_MS = Number(process.env.NIGHT_SHIFT_AUTO_CLOSE_SECONDS || 600) * 1000;
+// Hours left, from the server's own status (needs only the token, no open run).
+async function hoursState() {
+  const me = readMe();
+  if (!me?.token) return null;
+  try { const r = await (await fetch(SITE + "/api/status", { headers: { authorization: "Bearer " + me.token }, signal: AbortSignal.timeout(10_000) })).json(); return r.state || null; } catch { return null; }
+}
+// The open tasks and the number of accepted ones in this AI's mission, from the public project trees.
+async function taskFingerprint() {
+  const mission = readMe()?.mission || "indus-script";
+  try {
+    const projects = (await (await fetch(SITE + "/api/public/projects", { signal: AbortSignal.timeout(10_000) })).json()).projects.filter(p => p.mission === mission && /^[a-z0-9-]+$/.test(p.id));
+    const trees = await Promise.all(projects.map(async p => (await (await fetch(`${SITE}/api/projects/${p.id}/tree`, { signal: AbortSignal.timeout(10_000) })).json()).tasks || []));
+    const tasks = trees.flat();
+    return { open: new Set(tasks.filter(t => t.status === "open").map(t => t.id)), accepted: tasks.filter(t => t.status === "accepted").length };
+  } catch { return null; }
+}
+
+// Removes the weekly schedule this computer installed: the launchd agent or crontab entry, the wake events and
+// the pinned tools copy.
+export async function unschedule() {
+  try { stateDir(); } catch (e) { say("Night Shift: " + e.message); return 2; }
+  await weekly.uninstall({ step: (id, key, value, state) => state && say(`[${state === "ok" ? " ok " : state}] ${key.padEnd(9)} ${value}`) });
+  say("Night Shift won't start weekly runs on this computer. Your page still shows your last answer; choose Maybe later there to change it.");
+  return 0;
 }
 
 // A scheduler starts with almost no environment (launchd's PATH is /usr/bin:/bin:/usr/sbin:/sbin), so the schedule
@@ -356,8 +552,8 @@ export function scheduleSpec(tool, env, which = whichSync) {
   const path = [...new Set([dirname(node), dirname(claude), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
   return { ok: true, argv: [npx, "-y", tool, "start", "--weekly"], env: { PATH: path, NIGHT_SHIFT_CLAUDE: claude } };
 }
-export function whichSync(name, pathVar) {
-  for (const d of pathVar.split(":").filter(Boolean)) { const f = join(d, name); try { if (existsSync(f)) return realpathSync(f); } catch {} }
+export function whichSync(name, pathVar, resolve = true) {
+  for (const d of pathVar.split(":").filter(Boolean)) { const f = join(d, name); try { if (existsSync(f)) return resolve ? realpathSync(f) : f; } catch {} }
   return null;
 }
 const xml = v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
